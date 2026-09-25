@@ -75,6 +75,7 @@ graphify-out/
 
 # Node dependencies; committed Library bundles live in static/
 node_modules/
+*.tsbuildinfo
 docs/ui-ux/review-shots/
 
 # Python build metadata (never commit generated egg-info)
