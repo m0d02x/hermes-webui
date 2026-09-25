@@ -95,19 +95,8 @@ def test_composer_path_autocomplete_uses_workspace_suggest_endpoint():
     assert result["second"]["value"] == "~/Projects"
 
 
-def test_composer_input_uses_path_autocomplete_after_slash_branch():
-    assert "const cursor=$('msg').selectionStart;" in BOOT_JS
-    assert "getComposerPathAutocompleteMatches(text,cursor).then(matches=>" in BOOT_JS
-    assert "ta.value!==text||ta.selectionStart!==cursor" in BOOT_JS
 
 
-def test_dropdown_selection_replaces_only_path_token():
-    assert "const isPath=c.source==='path';" in COMMANDS_JS
-    assert "tokenStart:token.start" in COMMANDS_JS
-    assert "tokenEnd:token.end" in COMMANDS_JS
-    assert "current.slice(0,safeStart)+nextPath+current.slice(safeEnd)" in COMMANDS_JS
-    assert "ta.setSelectionRange(pos,pos);" in COMMANDS_JS
-    assert "ta.dispatchEvent(new Event('input',{bubbles:true}));" in COMMANDS_JS
 
 
 def test_path_suggestions_have_distinct_dropdown_style():

@@ -2300,6 +2300,7 @@ $('modelSelect').onchange=async()=>{
     if(warn&&typeof showToast==='function') showToast(warn,4000);
   }
 };
+let _composerLibraryRequestGeneration=0;
 $('msg').addEventListener('input',()=>{
   updateSendBtn();
   scheduleComposerAutoResize();
@@ -2309,11 +2310,26 @@ $('msg').addEventListener('input',()=>{
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
+  const requestGeneration=++_composerLibraryRequestGeneration;
+  const cursor=$('msg').selectionStart;
+  const sessionId=S&&S.session?S.session.session_id:null;
+  const profile=S&&S.activeProfile||'default';
+  const profileDefault=!!(S&&S.activeProfileIsDefault);
+  const profileSwitchGeneration=typeof _profileSwitchGeneration==='number'?_profileSwitchGeneration:null;
   const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;
+  const stillCurrent=()=>{
+    const ta=$('msg');
+    return ta&&ta.value===text&&ta.selectionStart===cursor&&
+      requestGeneration===_composerLibraryRequestGeneration&&
+      ((S&&S.session&&S.session.session_id)||null)===sessionId&&
+      (S&&S.activeProfile||'default')===profile&&
+      !!(S&&S.activeProfileIsDefault)===profileDefault&&
+      (profileSwitchGeneration===null||profileSwitchGeneration===_profileSwitchGeneration);
+  };
   if(_slashIdx>=0&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
       getSlashAutocompleteMatches(text).then(matches=>{
-        if(($('msg').value||'')!==text) return;
+        if(!stillCurrent()) return;
         if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
       });
     }else{
@@ -2322,13 +2338,27 @@ $('msg').addEventListener('input',()=>{
       if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
     }
     if(typeof ensureSkillCommandsLoadedForAutocomplete==='function') ensureSkillCommandsLoadedForAutocomplete();
+  } else if(typeof getComposerLibraryAutocompleteMatches==='function'){
+    getComposerLibraryAutocompleteMatches(text,cursor).then(matches=>{
+      if(!stillCurrent()) return;
+      matches.forEach(match=>{match.requestGeneration=requestGeneration;});
+      if(matches.length)showCmdDropdown(matches);
+      else if(typeof getComposerPathAutocompleteMatches==='function'){
+        getComposerPathAutocompleteMatches(text,cursor).then(paths=>{
+          if(!stillCurrent())return;
+          if(paths.length)showCmdDropdown(paths);else hideCmdDropdown();
+        }).catch(()=>{if(stillCurrent())hideCmdDropdown();});
+      }else hideCmdDropdown();
+    }).catch(()=>{
+      if(!stillCurrent())return;
+      hideCmdDropdown();
+      if(typeof showToast==='function')showToast('Library unavailable');
+    });
   } else if(typeof getComposerPathAutocompleteMatches==='function'){
-    const cursor=$('msg').selectionStart;
     getComposerPathAutocompleteMatches(text,cursor).then(matches=>{
-      const ta=$('msg');
-      if(!ta||ta.value!==text||ta.selectionStart!==cursor) return;
+      if(!stillCurrent()) return;
       if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
-    }).catch(()=>hideCmdDropdown());
+    }).catch(()=>{if(stillCurrent())hideCmdDropdown();});
   } else {
     hideCmdDropdown();
   }

@@ -10690,6 +10690,14 @@ from api.upload import (
     handle_transcribe_capability,
     handle_workspace_upload,
 )
+from api.library import (
+    handle_library_get,
+    handle_library_post,
+    handle_library_upload,
+    library_error_response,
+    project_reference,
+    resolve_project_path,
+)
 from api.streaming import (
     _sse,
     _sse_set_write_deadline,
@@ -14530,6 +14538,15 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/escape/file/raw":
         return _handle_escape_file_raw(handler, parsed)
 
+
+    if parsed.path == "/api/library/file/raw":
+        return _handle_library_file_raw(handler, parsed)
+
+    if parsed.path == "/api/library/reference":
+        return _handle_library_reference(handler, parsed)
+
+    if parsed.path.startswith("/api/library/"):
+        return handle_library_get(handler, parsed)
     if parsed.path == "/api/folder/download":
         return _handle_folder_download(handler, parsed)
 
@@ -15195,6 +15212,8 @@ def handle_post(handler, parsed) -> bool:
         return handle_upload_extract(handler)
     if parsed.path == "/api/workspace/upload":
         return handle_workspace_upload(handler)
+    if parsed.path == "/api/library/upload":
+        return handle_library_upload(handler)
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
@@ -15224,6 +15243,9 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path.startswith("/api/library/"):
+        return handle_library_post(handler, parsed, body)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
@@ -21122,6 +21144,56 @@ def _handle_file_raw(handler, parsed):
     if html_inline_ok:
         return _serve_inline_html_preview(handler, target, "no-store", csp=sandbox_csp, anchor_root=anchor_root)
     return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp, anchor_root=anchor_root)
+
+
+# Library raw files use a deliberately narrower allowlist than /api/media.
+_LIBRARY_INLINE_MIME_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp", "image/x-icon", "image/bmp",
+    "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
+    "audio/ogg", "audio/opus", "audio/flac",
+    "video/mp4", "video/quicktime", "video/webm", "video/ogg",
+    "application/pdf",
+})
+_LIBRARY_DOWNLOAD_MIME_TYPES = frozenset({
+    "text/html", "application/xhtml+xml", "image/svg+xml",
+})
+
+
+def _handle_library_file_raw(handler, parsed):
+    qs = parse_qs(parsed.query)
+    project_id = qs.get("project_id", [""])[0]
+    rel = qs.get("path", [""])[0]
+    if not project_id or not rel:
+        return bad(handler, "project_id and path are required", 400)
+    try:
+        root, target = resolve_project_path(project_id, rel)
+    except Exception as exc:
+        return library_error_response(handler, exc)
+    if not target.is_file():
+        return j(handler, {"error": "not found"}, status=404)
+    mime = MIME_MAP.get(target.suffix.lower(), "application/octet-stream")
+    force_download = qs.get("download", [""])[0] == "1"
+    disposition = (
+        "inline"
+        if not force_download
+        and mime in _LIBRARY_INLINE_MIME_TYPES
+        and mime not in _LIBRARY_DOWNLOAD_MIME_TYPES
+        else "attachment"
+    )
+    pdf_csp = "sandbox" if mime == "application/pdf" and disposition == "inline" else None
+    return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=pdf_csp, anchor_root=root)
+
+
+def _handle_library_reference(handler, parsed):
+    if _terminal_remote_backend_enabled():
+        return bad(handler, "Library references require a local agent profile.", 409)
+    project_id = parse_qs(parsed.query).get("project_id", [""])[0]
+    if not project_id:
+        return bad(handler, "project_id is required", 400)
+    try:
+        return j(handler, {"reference": project_reference(project_id)})
+    except Exception as exc:
+        return library_error_response(handler, exc)
 
 
 def _handle_file_read(handler, parsed):

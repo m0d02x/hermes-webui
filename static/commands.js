@@ -566,6 +566,34 @@ async function getComposerPathAutocompleteMatches(text,cursor){
       tokenEnd:token.end,
     }));
 }
+function _findComposerLibraryToken(text,cursor){
+  const value=String(text||'');
+  const rawCursor=Number(cursor);
+  const pos=Number.isFinite(rawCursor)?Math.max(0,Math.min(rawCursor,value.length)):value.length;
+  let start=pos;
+  while(start>0&&!/\s/.test(value.charAt(start-1))) start-=1;
+  let end=pos;
+  while(end<value.length&&!/\s/.test(value.charAt(end))) end+=1;
+  const token=value.slice(start,pos);
+  if(!token.startsWith('@')||(start>0&&!/\s/.test(value.charAt(start-1)))) return null;
+  return {start,end,query:token.slice(1)};
+}
+
+async function getComposerLibraryAutocompleteMatches(text,cursor){
+  const token=_findComposerLibraryToken(text,cursor);
+  if(!token||typeof api!=='function') return [];
+  const qs=new URLSearchParams({q:token.query,limit:'15'}).toString();
+  const data=await api(`/api/library/projects?${qs}`);
+  return ((data&&data.projects)||[]).map(project=>({
+    source:'library',
+    project_id:String(project.project_id||''),
+    name:String(project.name||''),
+    desc:'Shared Library project',
+    tokenStart:token.start,
+    tokenEnd:token.end,
+  })).filter(item=>item.project_id&&item.name);
+}
+
 
 function _compressionAnchorMessageKey(m){
   if(!m||!m.role||m.role==='tool') return null;
@@ -2231,6 +2259,62 @@ function ensureSkillCommandsLoadedForAutocomplete(){
 
 let _cmdSelectedIdx=-1;
 
+function insertLibraryReference(reference,tokenStart,tokenEnd){
+  const ta=$('msg');
+  if(!ta)return false;
+  const current=String(ta.value||'');
+  const hasRange=Number.isFinite(tokenStart)&&Number.isFinite(tokenEnd);
+  const hasSelection=Number.isFinite(ta.selectionStart)&&Number.isFinite(ta.selectionEnd);
+  const start=hasRange?tokenStart:(hasSelection?ta.selectionStart:current.length);
+  const end=hasRange?tokenEnd:(hasSelection?ta.selectionEnd:current.length);
+  const safeStart=Math.max(0,Math.min(Number(start)||0,current.length));
+  const safeEnd=Math.max(safeStart,Math.min(Number(end)||safeStart,current.length));
+  const insertion=String(reference||'');
+  ta.value=current.slice(0,safeStart)+insertion+current.slice(safeEnd);
+  const pos=safeStart+insertion.length;
+  ta.focus();
+  ta.setSelectionRange(pos,pos);
+  ta.dispatchEvent(new Event('input',{bubbles:true}));
+  return true;
+}
+
+async function _selectComposerLibraryProject(match){
+  const ta=$('msg');
+  if(!ta)return;
+  const snapshot={
+    value:String(ta.value||''),
+    start:Number(match.tokenStart),
+    end:Number(match.tokenEnd),
+    cursor:ta.selectionStart,
+    session:S&&S.session?S.session.session_id:null,
+    profile:S&&S.activeProfile||'default',
+    profileDefault:!!(S&&S.activeProfileIsDefault),
+    profileGeneration:typeof _profileSwitchGeneration==='number'?_profileSwitchGeneration:null,
+    generation:match.requestGeneration,
+  };
+  hideCmdDropdown();
+  try{
+    const qs=new URLSearchParams({project_id:match.project_id}).toString();
+    const data=await api(`/api/library/reference?${qs}`);
+    const current=$('msg');
+    if(!current||String(current.value||'')!==snapshot.value||
+      current.selectionStart!==snapshot.cursor||
+      !S||((S.session&&S.session.session_id)||null)!==snapshot.session||
+      (S.activeProfile||'default')!==snapshot.profile||!!S.activeProfileIsDefault!==snapshot.profileDefault||
+      (typeof snapshot.profileGeneration==='number'&&snapshot.profileGeneration!==_profileSwitchGeneration)||
+      (typeof snapshot.generation==='number'&&snapshot.generation!==_composerLibraryRequestGeneration)) return;
+    if(!data||typeof data.reference!=='string') throw new Error('Library unavailable');
+    insertLibraryReference(data.reference,snapshot.start,snapshot.end);
+  }catch(error){
+    const current=$('msg');
+    if(current&&String(current.value||'')===snapshot.value&&current.selectionStart===snapshot.cursor&&
+      S&&((S.session&&S.session.session_id)||null)===snapshot.session&&
+      (S.activeProfile||'default')===snapshot.profile&&!!S.activeProfileIsDefault===snapshot.profileDefault&&
+      (typeof snapshot.profileGeneration!=='number'||snapshot.profileGeneration===_profileSwitchGeneration)&&
+      (typeof snapshot.generation!=='number'||snapshot.generation===_composerLibraryRequestGeneration)&&
+      typeof showToast==='function') showToast(error&&error.message||'Library unavailable');
+  }
+}
 function showCmdDropdown(matches){
   const dd=$('cmdDropdown');
   if(!dd)return;
@@ -2252,15 +2336,19 @@ function showCmdDropdown(matches){
       : '';
     if(c.source==='skill') el.classList.add('cmd-item-skill');
     if(isPath) el.classList.add('cmd-item-path');
+    const isLibrary=c.source==='library';
     const nameHtml=isPath
       ? `<div class="cmd-item-name"><span class="cmd-item-path-value">${esc(c.value)}</span></div>`
       : isSubArg
       ? `<div class="cmd-item-name"><span class="cmd-item-parent">/${esc(c.parent)}</span> <span class="cmd-item-subarg">${esc(c.value)}</span></div>`
+      : isLibrary
+      ? `<div class="cmd-item-name">@${esc(c.name)}</div>`
       : `<div class="cmd-item-name">/${esc(c.name)}${usage}${badge}</div>`;
     const descHtml=`<div class="cmd-item-desc">${esc(c.desc)}</div>`;
     el.innerHTML=`${nameHtml}${descHtml}`;
     el.onmousedown=(e)=>{
       e.preventDefault();
+      if(isLibrary){_selectComposerLibraryProject(c);return;}
       if(isPath){
         const ta=$('msg');
         if(!ta){hideCmdDropdown();return;}
@@ -2269,6 +2357,7 @@ function showCmdDropdown(matches){
         const nextPath=String(c.value||'').endsWith('/')?String(c.value||''):`${String(c.value||'')}/`;
         const current=String(ta.value||'');
         const safeStart=Math.max(0,Math.min(start,current.length));
+
         const safeEnd=Math.max(safeStart,Math.min(end,current.length));
         ta.value=current.slice(0,safeStart)+nextPath+current.slice(safeEnd);
         const pos=safeStart+nextPath.length;

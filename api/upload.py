@@ -601,56 +601,22 @@ def handle_transcribe_capability(handler):
     return j(handler, {"ok": True, "available": bool(available), "provider": provider})
 
 
-def handle_workspace_upload(handler):
-    """Upload a file into a session's workspace directory.
-
-    Form fields:
-        session_id – target session
-        path       – subdirectory within the workspace (default: '')
-    File:
-        file – the uploaded file(s)
-    """
+def _handle_upload_to_root(handler, workspace: Path, subpath: str, files: dict, *, reject_symlinks: bool = False):
     import traceback as _tb
     try:
-        content_type = handler.headers.get('Content-Type', '')
-        content_length = int(handler.headers.get('Content-Length', 0) or 0)
-        if content_length > MAX_UPLOAD_BYTES:
-            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
 
-        fields, files = parse_multipart(handler.rfile, content_type, content_length)
-        session_id = fields.get('session_id', '')
-        subpath = fields.get('path', '')
-
-        if not session_id:
-            return j(handler, {'error': 'Missing session_id'}, status=400)
-
-        if not files:
-            return j(handler, {'error': 'No file field in request'}, status=400)
-
-        # Validate session
-        try:
-            session = get_session(session_id)
-        except KeyError:
-            return j(handler, {'error': 'Session not found'}, status=404)
-        if _reject_invisible_session(handler, session):
-            return True
-
-        # Resolve workspace root using the session profile, not the ambient request profile.
-        try:
-            workspace = resolve_trusted_workspace(
-                session.workspace, profile=getattr(session, "profile", None)
-            )
-        except TypeError:
-            workspace = resolve_trusted_workspace(session.workspace)
-
-        # Resolve target subdirectory within workspace
+        # Reject symlink navigation before safe_resolve_ws canonicalizes the path.
+        if reject_symlinks:
+            cursor = workspace
+            for part in Path(subpath).parts:
+                if part in ('', '.'):
+                    continue
+                cursor = cursor / part
+                if cursor.is_symlink():
+                    return j(handler, {'error': 'Upload path contains a symlink'}, status=403)
         target_dir = safe_resolve_ws(workspace, subpath) if subpath else workspace
-        # safe_resolve_ws intentionally permits in-workspace symlinks pointing
-        # outside the root (read trust model). For an UPLOAD target that's not
-        # acceptable: a planted symlink subpath would let mkdir() + writes create
-        # files OUTSIDE the workspace. Require the resolved target to be inside
-        # the workspace before creating anything. (is_relative_to is True for the
-        # workspace==target equality case, so the normal subpath='' path passes.)
+        # safe_resolve_ws blocks symlink escapes; retain an explicit containment
+        # check before creating the upload target as defense in depth.
         if not target_dir.resolve().is_relative_to(workspace.resolve()):
             return j(handler, {'error': 'Upload target escapes workspace'}, status=403)
         # #3398: create the upload target dir race-safely under the workspace root
@@ -666,6 +632,8 @@ def handle_workspace_upload(handler):
                 continue
 
             safe_name = _sanitize_upload_name(filename)
+            if reject_symlinks and (target_dir / safe_name).is_symlink():
+                return j(handler, {'error': 'Upload path contains a symlink'}, status=403)
             dest = safe_resolve_ws(target_dir, safe_name)
 
             # Path traversal guard (belt-and-suspenders: safe_resolve_ws above is
@@ -679,7 +647,10 @@ def handle_workspace_upload(handler):
                 stem = dest.stem
                 suffix = dest.suffix
                 for idx in range(1, 1000):
-                    candidate = safe_resolve_ws(target_dir, f'{stem}-{idx}{suffix}')
+                    candidate_name = f'{stem}-{idx}{suffix}'
+                    if reject_symlinks and (target_dir / candidate_name).is_symlink():
+                        return j(handler, {'error': 'Upload path contains a symlink'}, status=403)
+                    candidate = safe_resolve_ws(target_dir, candidate_name)
                     if not candidate.resolve().is_relative_to(workspace.resolve()):
                         return j(handler, {'error': 'Path traversal blocked'}, status=403)
                     if not candidate.exists():
@@ -694,6 +665,8 @@ def handle_workspace_upload(handler):
             # containment checks above cannot redirect the write outside the
             # workspace. The dedup loop guarantees `dest` does not exist.
             try:
+                if reject_symlinks and (target_dir / dest.name).is_symlink():
+                    return j(handler, {'error': 'Upload path contains a symlink'}, status=403)
                 _wfd = open_anchored_create_fd(workspace, dest.resolve())
             except FileExistsError:
                 return j(handler, {'error': f'Upload destination already exists: {safe_name}'}, status=409)
@@ -777,6 +750,56 @@ def handle_workspace_upload(handler):
         if len(results) == 1:
             return j(handler, results[0])
         return j(handler, {'files': results, 'count': len(results)})
+    except ValueError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    except Exception:
+        print('[webui] workspace upload error: ' + _tb.format_exc(), flush=True)
+        return j(handler, {'error': 'Upload failed'}, status=500)
+
+
+def handle_workspace_upload(handler):
+    """Upload a file into a session's workspace directory.
+
+    Form fields:
+        session_id – target session
+        path       – subdirectory within the workspace (default: '')
+    File:
+        file – the uploaded file(s)
+    """
+    import traceback as _tb
+    try:
+        content_type = handler.headers.get('Content-Type', '')
+        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        if content_length > MAX_UPLOAD_BYTES:
+            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
+
+        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        session_id = fields.get('session_id', '')
+        subpath = fields.get('path', '')
+
+        if not session_id:
+            return j(handler, {'error': 'Missing session_id'}, status=400)
+
+        if not files:
+            return j(handler, {'error': 'No file field in request'}, status=400)
+
+        # Validate session
+        try:
+            session = get_session(session_id)
+        except KeyError:
+            return j(handler, {'error': 'Session not found'}, status=404)
+        if _reject_invisible_session(handler, session):
+            return True
+
+        # Resolve workspace root using the session profile, not the ambient request profile.
+        try:
+            workspace = resolve_trusted_workspace(
+                session.workspace, profile=getattr(session, "profile", None)
+            )
+        except TypeError:
+            workspace = resolve_trusted_workspace(session.workspace)
+
+        return _handle_upload_to_root(handler, workspace, subpath, files)
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
     except Exception:

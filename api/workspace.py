@@ -1553,19 +1553,39 @@ def serialize_workspace_entries_for_browser(entries: list[dict] | None) -> list[
     return payload
 
 
-def list_dir(workspace: Path, rel: str='.'):
+def list_dir(workspace: Path, rel: str = '.', *, offset: int = 0, limit: int = 200,
+             include_unavailable_symlinks: bool = False):
     target = safe_resolve_ws(workspace, rel)
     if not target.is_dir():
         raise FileNotFoundError(f"Not a directory: {rel}")
     ws_resolved = workspace.resolve()
     target_resolved = target.resolve()
+    offset = max(0, offset)
+    limit = max(0, limit)
+    stop_after = offset + limit
     entries = []
+    if limit == 0:
+        return []
+
 
     def _process(name, is_symlink, raw_link, lstat_result, reachable):
         """Append one directory entry. ``raw_link`` is the os.readlink() result
         for symlinks (else None); ``lstat_result`` is an os.stat_result obtained
         with follow_symlinks=False (else None); ``reachable`` is False when a
         follow_symlinks=True stat raised (broken target or symlink loop)."""
+        if is_symlink and include_unavailable_symlinks:
+            display_path = name if not rel or rel == '.' else rel + '/' + name
+            entries.append({
+                'name': name,
+                'path': display_path,
+                'type': 'unavailable',
+                'is_dir': False,
+                'workspace_sort_rank': 0,
+                'mtime_ns': lstat_result.st_mtime_ns if lstat_result is not None else None,
+                'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,
+            })
+            return
+
         if is_symlink:
             # Keep the transport rank aligned with _sort_key_de/_sort_key_p.
             workspace_sort_rank = 0
@@ -1667,6 +1687,7 @@ def list_dir(workspace: Path, rel: str='.'):
                 'workspace_sort_rank': workspace_sort_rank,
             })
 
+
     if _DIR_FD_OK:
         # #3398 TOCTOU hardening (Linux/macOS): open the directory via an anchored
         # openat-walk (O_NOFOLLOW on every component) and enumerate via the verified
@@ -1714,8 +1735,9 @@ def list_dir(workspace: Path, rel: str='.'):
                     except OSError:
                         reachable = False
                 _process(name, is_symlink, raw_link, lst, reachable)
-                if len(entries) >= 200:
+                if len(entries) >= stop_after:
                     break
+            entries = entries[offset:stop_after]
         finally:
             try:
                 os.close(dir_fd)
@@ -1757,8 +1779,9 @@ def list_dir(workspace: Path, rel: str='.'):
                 except OSError:
                     reachable = False
             _process(name, is_symlink, raw_link, lst, reachable)
-            if len(entries) >= 200:
+            if len(entries) >= stop_after:
                 break
+        entries = entries[offset:stop_after]
     return entries
 
 
