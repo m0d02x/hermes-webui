@@ -73,9 +73,8 @@ graphify-out/
 
 .venv/
 
-# Dev-only lint tooling (ESLint runtime-error guard) — see TESTING.md
+# Node dependencies; committed Library bundles live in static/
 node_modules/
-package-lock.json
 docs/ui-ux/review-shots/
 
 # Python build metadata (never commit generated egg-info)

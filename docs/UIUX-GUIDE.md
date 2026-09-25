@@ -13,9 +13,10 @@ purely backend changes, use the runtime/state contracts instead.
 
 ## Product shape
 
-Hermes WebUI is a browser workbench for Hermes Agent with near-CLI parity and a
-simple implementation shape: Python on the server, vanilla JavaScript in the
-browser, no build step, no bundler, and no frontend framework.
+Hermes WebUI is a browser workbench for Hermes Agent with near-CLI parity.
+Python serves the application. Most screens use vanilla JavaScript; Library uses
+React and shadcn/ui with prebuilt, scoped assets. See
+[`Shared Library`](shared-library.md#develop-the-react-interface) for its build workflow.
 
 The primary layout is three-panel:
 

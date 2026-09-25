@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+#mainLibrary,
+#panelLibrary,
+.lib-scope {
+  --lib-background: var(--bg);
+  --lib-foreground: var(--text);
+  --lib-card: var(--surface);
+  --lib-card-foreground: var(--text);
+  --lib-popover: var(--surface);
+  --lib-popover-foreground: var(--text);
+  --lib-primary: var(--accent);
+  --lib-primary-foreground: var(--bg);
+  --lib-secondary: var(--surface-subtle, var(--surface));
+  --lib-secondary-foreground: var(--text);
+  --lib-muted: var(--surface-subtle, var(--surface));
+  --lib-muted-foreground: var(--muted);
+  --lib-accent: var(--accent-bg, var(--surface-subtle));
+  --lib-accent-foreground: var(--text);
+  --lib-destructive: var(--error);
+  --lib-destructive-foreground: var(--bg);
+  --lib-border: var(--border);
+  --lib-input: var(--border);
+  --lib-ring: var(--focus-ring, var(--accent));
+  --lib-radius: var(--radius-md, 8px);
+  color: var(--lib-foreground);
+  font-family: var(--font-ui);
+}
+
+.lib-scope {
+  color-scheme: inherit;
+}
+
+#mainLibrary { min-width: 0; overflow: hidden; }
+#panelLibrary { overflow-y: auto; }
+.lib-scope a { color: var(--lib-foreground); }
+.lib-scope :is(button, a, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+ 
+/* Keep shell element defaults from changing Tailwind primitives. */
+.lib-scope,
+.lib-scope *,
+.lib-scope *::before,
+.lib-scope *::after {
+  box-sizing: border-box;
+}
+
+.lib-scope *,
+.lib-scope *::before,
+.lib-scope *::after {
+  border-width: 0;
+  border-style: solid;
+  border-color: var(--lib-border);
+}
+
+.lib-scope button,
+.lib-scope input,
+.lib-scope select,
+.lib-scope textarea {
+  margin: 0;
+  color: inherit;
+  font: inherit;
+}
+
+.lib-scope button {
+  padding: 0;
+  border: 0;
+  border-style: solid;
+  background-color: transparent;
+  background-image: none;
+}
+
+.lib-scope button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.lib-scope input,
+.lib-scope select,
+.lib-scope textarea {
+  min-height: 44px;
+}
+
+@media (max-width: 640px) {
+  .lib-scope a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding-inline: 8px;
+  }
+  .lib-scope :is(input, select, textarea) { font-size: 16px; }
+  .lib-scope button { touch-action: manipulation; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lib-scope *,
+  .lib-scope *::before,
+  .lib-scope *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

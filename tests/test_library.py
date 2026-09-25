@@ -680,63 +680,35 @@ def test_auth_check_protects_library_routes(monkeypatch):
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_library_folder_upload_batch_stays_on_starting_project():
-    library_js = (REPO_ROOT / "static" / "library.js").read_text(encoding="utf-8")
-    script = textwrap.dedent(f"""
-      const vm=require('vm'), calls=[];
-      let releaseFirst;
-      const ctx={{console,URL,URLSearchParams,FormData,File,Blob,
-        document:{{baseURI:'http://hermes.local/',addEventListener(){{}},getElementById(){{return null;}}}},
-        window:{{matchMedia(){{return {{matches:false}};}}}},
-        $:()=>null,_targetDirForRelDir:(base,rel)=>rel?`${{base}}/${{rel}}`:base,
-        showToast(){{}},t:key=>key,
-        api:async(url,options={{}})=>{{
-          if(url==='/api/library/upload'){{
-            calls.push(options.body.get('project_id'));
-            if(calls.length===1)await new Promise(resolve=>releaseFirst=resolve);
-            return {{filename:'ok'}};
-          }}
-          if(url.startsWith('/api/library/list'))return {{entries:[],next_offset:null}};
-          throw new Error('Unexpected API '+url);
-        }}
-      }};
-      vm.createContext(ctx);vm.runInContext({json.dumps(library_js)},ctx);
-      (async()=>{{
-        vm.runInContext('library.selectedProjectId="project-a";library.folder="Brand";',ctx);
-        const pending=vm.runInContext('_libraryUploadFiles([{{file:new File(["one"],"one.md"),relDir:"Guidelines"}},{{file:new File(["two"],"two.md"),relDir:"Guidelines"}}])',ctx);
-        await new Promise(resolve=>setImmediate(resolve));
-        vm.runInContext('library.selectedProjectId="project-b";library.folder="Other";',ctx);
-        releaseFirst();
-        await pending;
-        process.stdout.write(JSON.stringify(calls));
-      }})().catch(error=>{{console.error(error.stack||error);process.exit(1);}});
-    """)
-    result = subprocess.run([NODE, "-e", script], check=True, capture_output=True, text=True, timeout=15)
-    assert json.loads(result.stdout) == ["project-a", "project-a"]
-
-@pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_library_pdf_preview_uses_sandbox_without_same_origin():
-    library_js = (REPO_ROOT / "static" / "library.js").read_text(encoding="utf-8")
+def test_react_library_mention_preserves_draft_when_navigation_changes_it():
+    host_js = (REPO_ROOT / "static" / "library-host.js").read_text(encoding="utf-8")
     script = textwrap.dedent("""
-      const vm=require('vm');
-      const elements={
-        libraryPreview:{children:[],replaceChildren(){this.children=[];},append(...items){this.children.push(...items);}},
-        libraryPreviewPane:{classList:{add(){},remove(){}}}
+      const vm = require('vm'), assert = require('node:assert/strict');
+      const composer = {value:'Existing draft',selectionStart:3,selectionEnd:3};
+      const insertions = [];
+      const ctx = {
+        window:{},URLSearchParams,
+        document:{getElementById:()=>composer},
+        S:{session:{session_id:'chat-a'},activeProfile:'default'},
+        _profileSwitchGeneration:0,
+        api:async()=>({reference:'Visible reference'}),
+        switchPanel:async()=>{composer.value='New draft while awaiting navigation';return true;},
+        insertLibraryReference:(...args)=>insertions.push(args),
       };
-      const ctx={console,URL,document:{baseURI:'http://hermes.local/',addEventListener(){},
-        getElementById:id=>elements[id]||null,
-        createElement:tag=>({tag,attrs:{},setAttribute(name,value){this.attrs[name]=value;}})
-      },t:key=>key};
-      vm.createContext(ctx);vm.runInContext(__LIBRARY_JS__,ctx);
+      vm.createContext(ctx);vm.runInContext(__HOST__,ctx);
       (async()=>{
-        vm.runInContext('library.selectedProjectId="project-a"',ctx);
-        await vm.runInContext('previewLibraryFile("guide.pdf")',ctx);
-        const frame=elements.libraryPreview.children[0];
-        process.stdout.write(JSON.stringify({tag:frame.tag,sandbox:frame.attrs.sandbox}));
-      })().catch(error=>{console.error(error.stack||error);process.exit(1);});
-    """).replace("__LIBRARY_JS__", json.dumps(library_js))
-    result = subprocess.run([NODE, "-e", script], check=True, capture_output=True, text=True, timeout=15)
-    assert json.loads(result.stdout) == {"tag": "iframe", "sandbox": ""}
+        await ctx.window.libraryHost.mention('project-a');
+        assert.equal(composer.value,'New draft while awaiting navigation');
+        assert.deepEqual(insertions,[]);
+        ctx.switchPanel=async()=>true;
+        await ctx.window.libraryHost.mention('project-a');
+        assert.deepEqual(insertions,[['Visible reference',3,3]]);
+        ctx.switchPanel=async()=>false;
+        await ctx.window.libraryHost.mention('project-a');
+        assert.equal(insertions.length,1);
+      })().catch(error=>{console.error(error);process.exit(1);});
+    """).replace("__HOST__", json.dumps(host_js))
+    subprocess.run([NODE, "-e", script], check=True, capture_output=True, text=True, timeout=15)
 
 def _run_commands_js(body: str, extra_context: str = "") -> dict:
     commands = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")

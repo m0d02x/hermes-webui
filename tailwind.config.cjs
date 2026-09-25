@@ -1,0 +1,37 @@
+module.exports = {
+  prefix: "lib-",
+  important: ".lib-scope",
+  content: ["./frontend/**/*.{ts,tsx}"],
+  corePlugins: { preflight: false },
+  theme: {
+    extend: {
+      colors: {
+        background: "var(--lib-background)",
+        foreground: "var(--lib-foreground)",
+        card: "var(--lib-card)",
+        "card-foreground": "var(--lib-card-foreground)",
+        popover: "var(--lib-popover)",
+        "popover-foreground": "var(--lib-popover-foreground)",
+        primary: "var(--lib-primary)",
+        "primary-foreground": "var(--lib-primary-foreground)",
+        secondary: "var(--lib-secondary)",
+        "secondary-foreground": "var(--lib-secondary-foreground)",
+        muted: "var(--lib-muted)",
+        "muted-foreground": "var(--lib-muted-foreground)",
+        "destructive-foreground": "var(--lib-destructive-foreground)",
+        accent: "var(--lib-accent)",
+        "accent-foreground": "var(--lib-accent-foreground)",
+        destructive: "var(--lib-destructive)",
+        border: "var(--lib-border)",
+        input: "var(--lib-input)",
+        ring: "var(--lib-ring)",
+      },
+      borderRadius: {
+        lg: "var(--lib-radius)",
+        md: "calc(var(--lib-radius) - 2px)",
+        sm: "calc(var(--lib-radius) - 4px)",
+      },
+    },
+  },
+  plugins: [require("tailwindcss-animate")],
+};

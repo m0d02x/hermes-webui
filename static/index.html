@@ -70,6 +70,7 @@
   }
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/library-react.css?v=__WEBUI_VERSION__">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
@@ -205,15 +206,7 @@
       <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" type="search" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
       <div class="session-list" id="sessionList"></div>
     </div>
-    <section class="panel-view library-sidebar" id="panelLibrary" aria-label="Library projects">
-      <div class="panel-head"><span data-i18n="tab_library">Library</span><button class="btn primary" type="button" onclick="createLibraryProject()" data-i18n="library_create_project">New project</button></div>
-      <label class="library-sr-only" for="librarySearch" data-i18n="library_search">Search projects</label>
-      <input id="librarySearch" class="library-search" type="search" data-i18n-placeholder="library_search" placeholder="Search projects" oninput="searchLibraryProjects(this.value)">
-      <div id="libraryProjectStatus" class="library-status" aria-live="polite"></div>
-      <button id="libraryProjectRetry" class="btn secondary library-retry" type="button" onclick="loadLibrary()" hidden data-i18n="library_retry">Retry</button>
-      <ul id="libraryProjectList" class="library-project-list" aria-label="Library projects"></ul>
-      <button id="libraryProjectMore" class="btn secondary library-more" type="button" onclick="loadMoreLibraryProjects()" hidden data-i18n="library_load_more">Load more</button>
-    </section>
+    <section class="panel-view lib-scope" id="panelLibrary" aria-label="Library projects"></section>
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">
       <div class="panel-head">
@@ -791,32 +784,7 @@
       </div>
     </div>
     </div><!-- /#mainChat -->
-    <section id="mainLibrary" class="main-view library-main" aria-label="Library">
-      <header class="library-header">
-        <nav id="libraryBreadcrumbs" class="library-breadcrumbs" aria-label="Library folder path"></nav>
-        <div class="library-toolbar">
-          <button class="btn secondary library-requires-project" type="button" onclick="createLibraryFolder()" data-i18n="library_new_folder" disabled>New folder</button>
-          <button class="btn secondary library-requires-project" type="button" onclick="$('libraryFileInput').click()" data-i18n="library_upload_files" disabled>Upload files</button>
-          <button class="btn secondary library-requires-project" type="button" onclick="$('libraryFolderInput').click()" data-i18n="library_upload_folder" disabled>Upload folder</button>
-          <button class="btn secondary library-requires-project" type="button" onclick="mentionLibraryProjectInChat()" data-i18n="library_mention" disabled>Mention in chat</button>
-          <button class="btn secondary library-requires-project" type="button" onclick="loadLibraryDirectory(library.folder, {append:false})" data-i18n="library_refresh" disabled>Refresh</button>
-        </div>
-        <input id="libraryFileInput" type="file" multiple hidden aria-label="Upload files">
-        <input id="libraryFolderInput" type="file" multiple webkitdirectory directory hidden aria-label="Upload folder">
-      </header>
-      <div id="libraryMainStatus" class="library-status" aria-live="polite">Select a project to browse its files.</div>
-      <button id="libraryMainRetry" class="btn secondary library-retry" type="button" onclick="loadLibraryDirectory(library.folder, {append:false})" hidden data-i18n="library_retry">Retry</button>
-      <div class="library-browser">
-        <section class="library-files-pane" aria-label="Project files">
-          <div id="libraryEntries" class="library-entry-list" role="list"></div>
-          <button id="libraryEntryMore" class="btn secondary library-more" type="button" onclick="loadMoreLibraryEntries()" hidden data-i18n="library_load_more">Load more</button>
-        </section>
-        <section id="libraryPreviewPane" class="library-preview-pane" aria-label="File preview">
-          <button class="btn secondary library-preview-back" type="button" onclick="closeLibraryPreview()" data-i18n="library_back">Back</button>
-          <div id="libraryPreview"></div>
-        </section>
-      </div>
-    </section>
+    <section id="mainLibrary" class="main-view lib-scope" aria-label="Library"></section>
     <div id="mainSkills" class="main-view">
       <div class="main-view-header">
         <div class="main-view-title" id="skillDetailTitle"></div>
@@ -1811,7 +1779,8 @@
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/library.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/library-host.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/library-react.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
