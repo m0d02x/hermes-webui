@@ -29,7 +29,7 @@ def test_session_jump_buttons_are_opt_in_and_keep_existing_bottom_button():
     assert '"session_jump_buttons"' in CONFIG_PY
     assert "window._sessionJumpButtonsEnabled=!!s.session_jump_buttons" in BOOT_JS
     assert "window._sessionJumpButtonsEnabled=false" in BOOT_JS
-    assert "session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked" in PANELS_JS
+    assert "session_jump_buttons:_settingsChecked('appearance','settingsSessionJumpButtons')" in PANELS_JS
 
     scroll_listener = UI_JS[UI_JS.index("el.addEventListener('scroll'") : UI_JS.index("})();", UI_JS.index("el.addEventListener('scroll'"))]
     assert "const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80" in scroll_listener
@@ -76,7 +76,7 @@ def test_session_jump_buttons_are_i18n_localized_in_text_tooltip_and_aria():
         "session_jump_end": "End",
         "session_jump_end_label": "Jump to end of session",
         "settings_label_session_jump_buttons": "Show session jump buttons",
-        "settings_desc_session_jump_buttons": "Show floating Start and End buttons while reading long session histories.",
+        "settings_desc_session_jump_buttons": "Show Start/End and per-response jump buttons in long session histories.",
     }
     for key in english_literals:
         assert I18N_JS.count(f"{key}:") >= 8, f"missing locale entries for {key}"

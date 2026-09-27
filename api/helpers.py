@@ -154,7 +154,7 @@ def _csp_extra_frame_src() -> str:
 
 
 def _csp_connect_src(extra_connect_src: str = "") -> str:
-    return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
+    return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net https://models.dev{extra_connect_src}"
 
 
 def _csp_frame_src(extra_frame_src: str = "") -> str:

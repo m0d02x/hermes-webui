@@ -9404,11 +9404,21 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
                 if apply_prefix:
                     picker_models = _apply_provider_prefix(picker_models, provider_id, active_provider)
-                visible_models, extra_models = _split_picker_overflow_models(
-                    picker_models,
-                    selected_model_id=_picker_selected_model_id,
-                    provider_id=provider_id,
-                )
+                # Custom OpenAI-compatible routers are user-owned catalogs. Do
+                # not hide their live model inventory behind the generic
+                # featured/overflow cap: a router's whole point is exposing
+                # every upstream route, and the frontend has no reliable
+                # provider-specific "show all" affordance for this group.
+                # Keep the cap for large built-in aggregators (Nous/OpenRouter)
+                # where it was introduced for dropdown scannability.
+                if str(provider_id or "").strip().lower().startswith("custom:"):
+                    visible_models, extra_models = picker_models, []
+                else:
+                    visible_models, extra_models = _split_picker_overflow_models(
+                        picker_models,
+                        selected_model_id=_picker_selected_model_id,
+                        provider_id=provider_id,
+                    )
                 if not (visible_models or extra_models or models_endpoint_error or allow_empty):
                     return
                 group_entry = {
@@ -11395,7 +11405,7 @@ _SETTINGS_DEFAULTS = {
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | graphite | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
-    "session_jump_buttons": False,  # show Start/End transcript jump pills
+    "session_jump_buttons": False,  # show Start/End and per-response transcript jump buttons
     "render_user_markdown": False,  # opt-in: render full markdown in user messages (#3870)
     "large_text_paste_as_attachment": True,  # convert very large composer text pastes into .md attachments by default
     "project_quick_create_buttons": False,  # opt-in: show per-project "+" quick-create buttons on sidebar project chips (#4676)

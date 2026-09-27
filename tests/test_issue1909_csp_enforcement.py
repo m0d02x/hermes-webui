@@ -50,7 +50,7 @@ def test_security_helper_sends_enforcing_csp_with_hardening_directives(monkeypat
     assert "object-src 'none'" in policy
     assert "frame-ancestors 'none'" in policy
     assert "media-src 'self' data: blob:" in policy
-    assert "connect-src 'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost https://127.0.0.1:* https://localhost:* ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net" in policy
+    assert "connect-src 'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost https://127.0.0.1:* https://localhost:* ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net https://models.dev" in policy
 
 
 def test_enforcing_csp_honors_valid_extra_connect_origins(monkeypatch):
@@ -65,7 +65,7 @@ def test_enforcing_csp_honors_valid_extra_connect_origins(monkeypatch):
     assert (
         "connect-src 'self' http://127.0.0.1:* http://localhost:* "
         "http://ipc.localhost https://127.0.0.1:* https://localhost:* "
-        "ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net "
+        "ws://127.0.0.1:* ws://localhost:* https://cdn.jsdelivr.net https://models.dev "
         "https://metrics.example.com wss://events.example.com:443; "
     ) in policy
 

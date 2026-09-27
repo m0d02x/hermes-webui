@@ -1604,6 +1604,17 @@ function _applySessionNavigationPrefs(){
   if(container) container.classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled());
   _updateSessionStartJumpButton();
 }
+
+function _setSessionJumpButtonsEnabled(enabled){
+  const next=enabled===true;
+  const changed=_isSessionJumpButtonsEnabled()!==next;
+  window._sessionJumpButtonsEnabled=next;
+  _applySessionNavigationPrefs();
+  if(changed&&S&&S.session&&typeof renderMessages==='function'){
+    renderMessages({preserveScroll:true});
+  }
+  return changed;
+}
 function _updateSessionStartJumpButton(){
   const btn=$('jumpToSessionStartBtn');
   const container=$('messages');
@@ -1663,7 +1674,7 @@ function _userMessageDomId(rawIdx){
 }
 
 function _questionJumpButtonHtml(questionRawIdx, assistantRawIdx){
-  if(typeof questionRawIdx!=='number'||questionRawIdx<0) return '';
+  if(!_isSessionJumpButtonsEnabled()) return '';
   const label=t('jump_to_question')||'Response';
   const title=t('jump_to_question_label')||'Jump to the start of this response';
   const aIdx=(typeof assistantRawIdx==='number'&&assistantRawIdx>=0)?assistantRawIdx:-1;
@@ -4028,6 +4039,60 @@ function _compactComposerModelChipLabel(modelId,labelText){
   return raw;
 }
 
+let _modelsDevLabelIndex=null;
+let _modelsDevCatalogPromise=null;
+
+function _modelsDevBuildLabelIndex(catalog){
+  const index={exact:new Map(),slug:new Map(),suffix:new Map()};
+  const add=(map,key,name)=>{
+    const normalized=name.toLowerCase().replace(/[^a-z0-9]/g,'');
+    if(!normalized) return;
+    if(!map.has(key)) map.set(key,{normalized,name});
+    else if(!map.get(key)||map.get(key).normalized!==normalized) map.set(key,null);
+  };
+  if(!catalog||typeof catalog!=='object') return index;
+  for(const provider of Object.values(catalog)){
+    if(!provider||!provider.models||typeof provider.models!=='object') continue;
+    for(const [modelId,model] of Object.entries(provider.models)){
+      if(!model||typeof model.name!=='string'||!model.name.trim()) continue;
+      const id=modelId.toLowerCase();
+      const name=model.name.trim();
+      add(index.exact,id,name);
+      if(id.includes('/')) add(index.suffix,id.slice(id.lastIndexOf('/')+1),name);
+      else add(index.slug,id,name);
+    }
+  }
+  return index;
+}
+
+function _modelsDevDisplayLabel(modelId,index){
+  const id=String(modelId||'').trim().toLowerCase();
+  if(!id||!index) return null;
+  if(index.exact.has(id)) return (index.exact.get(id)||{}).name||null;
+  const slash=id.lastIndexOf('/');
+  const slug=slash>=0?id.slice(slash+1):id;
+  return (index.slug.get(slug)||index.suffix.get(slug)||{}).name||null;
+}
+
+
+function _loadModelsDevCatalog(){
+  if(_modelsDevCatalog||_modelsDevCatalogPromise) return _modelsDevCatalogPromise;
+  if(typeof fetch!=='function') return null;
+  _modelsDevCatalogPromise=fetch('https://models.dev/api.json',{credentials:'omit'})
+    .then(response=>{
+      if(!response.ok) throw new Error('models.dev catalog unavailable');
+      return response.json();
+    })
+    .then(catalog=>{
+      if(catalog&&typeof catalog==='object'&&!Array.isArray(catalog)){
+        _modelsDevLabelIndex=_modelsDevBuildLabelIndex(catalog);
+        if(typeof syncModelChip==='function') syncModelChip();
+      }
+    })
+    .catch(()=>{});
+  return _modelsDevCatalogPromise;
+}
+
 function syncModelChip(){
   const sel=$('modelSelect');
   const chip=$('composerModelChip');
@@ -4046,13 +4111,15 @@ function syncModelChip(){
   const opt=_selectedModelOption();
   const text=opt?opt.textContent:getModelLabel(sel.value||'');
   const compactText=_compactComposerModelChipLabel(sel.value||'', text);
+  const catalogText=_modelsDevDisplayLabel(sel.value||'',_modelsDevLabelIndex);
   const gatewayRouting=_latestGatewayRoutingForSession(S.session);
-  const displayText=_formatGatewayModelLabel(sel.value||'',compactText,gatewayRouting)||compactText;
+  const displayText=_formatGatewayModelLabel(sel.value||'',catalogText||compactText,gatewayRouting)||catalogText||compactText;
   label.textContent=displayText;
   if(mobileLabel) mobileLabel.textContent=displayText;
   chip.title=gatewayRouting?`${sel.value||'Conversation model'} ${_gatewayRoutingLabel(gatewayRouting)}`:(sel.value||'Conversation model');
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
   if(mobileAction) mobileAction.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
+  _loadModelsDevCatalog();
 }
 
 // Remembers where #composerModelDropdown lives in the composer-footer so the
@@ -15550,6 +15617,7 @@ function _messageRenderCacheSignature(){
     _addBoundedHash(add, tc.snippet);
     _addBoundedHash(add, tc.args||{});
   });
+  add(_isSessionJumpButtonsEnabled());
   if(S.session){
     add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
     _addBoundedHash(add, S.session.compression_anchor_message_key||null);

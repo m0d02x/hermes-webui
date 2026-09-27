@@ -1,6 +1,9 @@
 """Regression coverage for #2246 per-turn jump-to-question buttons."""
 
 from pathlib import Path
+import json
+import shutil
+import subprocess
 
 REPO = Path(__file__).resolve().parents[1]
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
@@ -65,26 +68,29 @@ def test_question_jump_button_matches_bottom_button_size_on_mobile():
     assert ".msg-question-jump-btn span:last-child { display: none; }" in STYLE_CSS
 
 
-def test_question_jump_footer_is_discoverable_on_desktop_without_exposing_actions():
-    # Desktop cannot rely on the mobile always-visible footer override, but the
-    # per-turn jump affordance is navigation, not quiet action chrome. Keep only
-    # the jump button discoverable at rest; reveal timestamp/actions on hover or
-    # keyboard focus.
-    block_anchor = "Desktop/tablet keeps the per-turn jump affordance discoverable"
-    block_start = STYLE_CSS.index(block_anchor)
-    block_end = STYLE_CSS.index(".assistant-turn .msg-foot-with-usage", block_start)
-    desktop_jump_block = STYLE_CSS[block_start:block_end]
+def test_question_jump_footer_is_quiet_until_hover_or_focus():
+    desktop_start = STYLE_CSS.index("/* Assistant footer:")
+    desktop_end = STYLE_CSS.index(
+        "@media (hover: none) and (pointer: coarse) and (min-width: 641px)",
+        desktop_start,
+    )
+    desktop_footer = STYLE_CSS[desktop_start:desktop_end]
 
-    assert "@media (min-width: 641px)" in desktop_jump_block
+    assert ".msg-row[data-role=\"assistant\"] .msg-foot," in desktop_footer
+    assert "opacity: 0;" in desktop_footer
+    assert ".msg-row[data-role=\"assistant\"]:hover .msg-foot" in desktop_footer
+    assert ".msg-row[data-role=\"assistant\"]:focus-within .msg-foot" in desktop_footer
+    assert ".assistant-turn:hover .msg-foot" in desktop_footer
+    assert ".assistant-turn:focus-within .msg-foot" in desktop_footer
+    assert ".msg-foot:has(.msg-question-jump-btn)" not in desktop_footer
 
-    assert ".assistant-turn .msg-foot:has(.msg-question-jump-btn)" in desktop_jump_block
-    assert "opacity: 1;" in desktop_jump_block
-    assert ".msg-foot:has(.msg-question-jump-btn) .msg-time" in desktop_jump_block
-    assert ".msg-foot:has(.msg-question-jump-btn) .msg-actions" in desktop_jump_block
-    assert "pointer-events: none;" in desktop_jump_block
-    assert ".assistant-turn:hover .msg-foot:has(.msg-question-jump-btn) .msg-actions" in desktop_jump_block
-    assert ".assistant-turn:focus-within .msg-foot:has(.msg-question-jump-btn) .msg-actions" in desktop_jump_block
-    assert "pointer-events: auto;" in desktop_jump_block
+    touch_start = STYLE_CSS.index(
+        "@media (hover: none) and (pointer: coarse) and (min-width: 641px)"
+    )
+    touch_end = STYLE_CSS.index(".assistant-turn .msg-foot-with-usage", touch_start)
+    touch_footer = STYLE_CSS[touch_start:touch_end]
+    assert ".msg-foot:has(.msg-question-jump-btn)" in touch_footer
+    assert "opacity: 1;" in touch_footer
 
 
 def test_question_jump_text_is_localized():
@@ -107,3 +113,106 @@ def test_question_jump_skips_hidden_first_segment_and_falls_back():
     assert ".assistant-segment-worklog-source{" in STYLE_CSS
     assert ".assistant-segment-anchor { display: none; }" in STYLE_CSS
 
+
+
+def test_response_jump_buttons_respect_session_jump_preference():
+    node = shutil.which("node")
+    assert node, "node is required to exercise the production jump-button renderer"
+    driver = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[1], 'utf8');
+const start = ui.indexOf('function _questionJumpButtonHtml(');
+const end = ui.indexOf('\nfunction _highlightQuestionRow(', start);
+if (start < 0 || end < 0) throw new Error('question jump renderer not found');
+function t(key) {
+  return key === 'jump_to_question' ? 'to response' : 'Jump to the start of this response';
+}
+function esc(value) { return String(value).replace(/[&<>"]/g, ''); }
+let enabled = false;
+function _isSessionJumpButtonsEnabled() { return enabled; }
+eval(ui.slice(start, end));
+const disabled = _questionJumpButtonHtml(4, 5);
+enabled = true;
+const enabledHtml = _questionJumpButtonHtml(4, 5);
+process.stdout.write(JSON.stringify({disabled, enabledHtml}));
+"""
+    result = subprocess.run(
+        [node, "-e", driver, str(REPO / "static" / "ui.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output = json.loads(result.stdout)
+    assert output["disabled"] == ""
+    assert 'class="msg-question-jump-btn session-jump-btn session-jump-btn--inline"' in output["enabledHtml"]
+    assert "jumpToTurnQuestion(4,5)" in output["enabledHtml"]
+
+
+def test_changing_session_jump_preference_refreshes_existing_messages():
+    node = shutil.which("node")
+    assert node, "node is required to exercise the production navigation preference"
+    driver = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[1], 'utf8');
+const start = ui.indexOf('function _isSessionJumpButtonsEnabled()');
+const end = ui.indexOf('\nfunction _updateSessionStartJumpButton(', start);
+if (start < 0 || end < 0) throw new Error('session navigation preference helpers not found');
+let rendered = 0;
+const classes = new Set(['session-nav-enabled']);
+const messages = {
+  classList: {
+    contains(name) { return classes.has(name); },
+    toggle(name, value) { value ? classes.add(name) : classes.delete(name); },
+  },
+};
+function $(id) { return id === 'messages' ? messages : null; }
+function _updateSessionStartJumpButton() {}
+function renderMessages(options) { rendered++; }
+const window = {_sessionJumpButtonsEnabled: true};
+const S = {session: {session_id: 'test'}, messages: [{}]};
+eval(ui.slice(start, end));
+_setSessionJumpButtonsEnabled(false);
+_setSessionJumpButtonsEnabled(false);
+process.stdout.write(JSON.stringify({
+  enabled: _isSessionJumpButtonsEnabled(),
+  navClass: classes.has('session-nav-enabled'),
+  rendered,
+}));
+"""
+    result = subprocess.run(
+        [node, "-e", driver, str(REPO / "static" / "ui.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output = json.loads(result.stdout)
+    assert output == {"enabled": False, "navClass": False, "rendered": 1}
+
+
+def test_message_html_cache_signature_tracks_jump_button_preference():
+    node = shutil.which("node")
+    assert node, "node is required to exercise the production message cache signature"
+    driver = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[1], 'utf8');
+const start = ui.indexOf('function _messageRenderCacheSignature()');
+const end = ui.indexOf('\nfunction _clipCliToolSnippet(', start);
+if (start < 0 || end < 0) throw new Error('message cache signature not found');
+const S = {messages: [], toolCalls: [], session: {}};
+const window = {_sessionJumpButtonsEnabled: false};
+function _isSessionJumpButtonsEnabled() { return window._sessionJumpButtonsEnabled === true; }
+function _addBoundedHash(add, value) { add(value); }
+eval(ui.slice(start, end));
+const disabledSignature = _messageRenderCacheSignature();
+window._sessionJumpButtonsEnabled = true;
+const enabledSignature = _messageRenderCacheSignature();
+process.stdout.write(JSON.stringify({disabledSignature, enabledSignature}));
+"""
+    result = subprocess.run(
+        [node, "-e", driver, str(REPO / "static" / "ui.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output = json.loads(result.stdout)
+    assert output["disabledSignature"] != output["enabledSignature"]

@@ -35,3 +35,12 @@ class TestCSPConnectSrcJsdelivr:
         assert "'self'" in connect_match.group(1), (
             "connect-src must retain 'self' after adding cdn.jsdelivr.net"
         )
+
+    def test_connect_src_allows_models_dev_catalog(self):
+        """The composer model label fetches the public models.dev catalog."""
+        policy = _policy()
+        connect_match = re.search(r"connect-src\s+([^;]+);", policy)
+        assert connect_match, "connect-src directive must exist in CSP"
+        assert "https://models.dev" in connect_match.group(1), (
+            "connect-src must allow models.dev or the catalog request is blocked"
+        )

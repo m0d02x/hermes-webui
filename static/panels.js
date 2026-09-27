@@ -11627,8 +11627,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._workspaceTodosTab=!!body.workspace_todos_tab;
   if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
-  window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
-  if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+  _setSessionJumpButtonsEnabled(body.session_jump_buttons);
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   // #5170 mirror write in _applySavedSettingsUi, under the #5145 rename:
   // persist so a reload/offline first-send honors the resolved mode.
@@ -12940,7 +12939,7 @@ window.addEventListener('hermes-settings:changed',event=>{
     }
   }
   if(pane==='appearance'){
-    if(Object.prototype.hasOwnProperty.call(payload,'session_jump_buttons')) window._sessionJumpButtonsEnabled=!!payload.session_jump_buttons;
+    if(Object.prototype.hasOwnProperty.call(payload,'session_jump_buttons')) _setSessionJumpButtonsEnabled(payload.session_jump_buttons);
     if(Object.prototype.hasOwnProperty.call(payload,'session_endless_scroll')) window._sessionEndlessScrollEnabled=!!payload.session_endless_scroll;
     if(Object.prototype.hasOwnProperty.call(payload,'auto_scroll_follow')){window._autoScrollFollow=!!payload.auto_scroll_follow;if(typeof _persistAutoScrollFollow==='function') _persistAutoScrollFollow(window._autoScrollFollow);}
     if(Object.prototype.hasOwnProperty.call(payload,'render_user_markdown')){window._renderUserMarkdown=!!payload.render_user_markdown;if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();if(typeof renderMessages==='function') renderMessages();}
