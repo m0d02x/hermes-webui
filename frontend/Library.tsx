@@ -4,7 +4,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Pencil, Trash2 } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Delete02Icon, File01Icon, Folder01Icon, PencilEdit02Icon } from "@hugeicons/core-free-icons";
 import { libraryError, libraryPathJoin, libraryUrl, listDirectory, listProjects, postLibrary, uploadLibraryBatch, type LibraryEntry, type LibraryProject, type UploadItem } from "./library-api";
 
 const t = (key: string, fallback: string) => window.libraryHost.translate(key, fallback);
@@ -281,9 +282,9 @@ export function Library() {
     {projectStatus && <p className={`lib-text-sm ${projectError ? "lib-text-destructive" : "lib-text-muted-foreground"}`} role={projectError ? "alert" : "status"}>{projectStatus}</p>}
     {projectError && <Button variant="outline" size="sm" onClick={refresh}>{t("library_retry", "Retry")}</Button>}
     <ul className="lib-m-0 lib-flex lib-list-none lib-flex-col lib-gap-1 lib-overflow-y-auto lib-p-0">{projects.map((project) => <li key={project.project_id} className="lib-flex lib-items-center lib-gap-1">
-      <Button variant={selectedId === project.project_id ? "secondary" : "ghost"} className="lib-min-w-0 lib-flex-1 lib-justify-start lib-truncate" aria-current={selectedId === project.project_id ? "true" : undefined} onClick={() => selectProject(project.project_id)}>{project.name}</Button>
-      <Button variant="ghost" size="icon" aria-label={`${t("library_rename", "Rename")} ${project.name}`} onClick={() => openEdit({ kind: "rename-project", projectId: project.project_id, projectName: project.name, folder, value: project.name })}><Pencil aria-hidden="true" /></Button>
-      <Button variant="ghost" size="icon" aria-label={`${t("library_delete", "Delete")} ${project.name}`} onClick={() => { setConfirmError(""); setConfirm({ kind: "project", projectId: project.project_id, name: project.name }); }}><Trash2 aria-hidden="true" /></Button>
+      <Button variant={selectedId === project.project_id ? "secondary" : "ghost"} className="lib-min-w-0 lib-flex-1 lib-justify-start lib-truncate" aria-current={selectedId === project.project_id ? "true" : undefined} onClick={() => selectProject(project.project_id)}><HugeiconsIcon icon={Folder01Icon} size={16} className="library-folder-icon lib-shrink-0" aria-hidden="true" />{project.name}</Button>
+      <Button variant="ghost" size="icon" aria-label={`${t("library_rename", "Rename")} ${project.name}`} onClick={() => openEdit({ kind: "rename-project", projectId: project.project_id, projectName: project.name, folder, value: project.name })}><HugeiconsIcon icon={PencilEdit02Icon} aria-hidden="true" /></Button>
+      <Button variant="ghost" size="icon" aria-label={`${t("library_delete", "Delete")} ${project.name}`} onClick={() => { setConfirmError(""); setConfirm({ kind: "project", projectId: project.project_id, name: project.name }); }}><HugeiconsIcon icon={Delete02Icon} aria-hidden="true" /></Button>
     </li>)}</ul>
     {nextProjects !== null && <Button variant="outline" size="sm" onClick={() => void loadProjects(query, true)}>{t("library_load_more", "Load more")}</Button>}
   </section>, sidebarHost);
@@ -331,7 +332,7 @@ export function Library() {
             const date = entry.mtime_ns === undefined || entry.mtime_ns === null ? null : new Date(Number(entry.mtime_ns) / 1_000_000);
             return <article key={path} className="lib-flex lib-flex-wrap lib-items-center lib-justify-between lib-gap-2 lib-border-b lib-py-2" role="listitem">
               <div className="lib-flex lib-w-full lib-min-w-0 lib-flex-wrap lib-items-center lib-gap-2">
-                <button type="button" className="lib-min-w-0 lib-flex-1 lib-break-all lib-text-left lib-font-medium" disabled={unavailable} onClick={() => directory ? void loadDirectory(path) : selectedId && void previewFile(selectedId, path)}>{directory ? "▸ " : ""}{entry.name}{unavailable ? " (unavailable)" : ""}</button>
+                <button type="button" className="lib-inline-flex lib-min-w-0 lib-flex-1 lib-items-center lib-gap-2 lib-break-all lib-text-left lib-font-medium" disabled={unavailable} onClick={() => directory ? void loadDirectory(path) : selectedId && void previewFile(selectedId, path)}>{directory ? <HugeiconsIcon icon={Folder01Icon} size={16} className="library-folder-icon lib-shrink-0" aria-hidden="true" /> : <HugeiconsIcon icon={File01Icon} size={16} className="library-file-icon lib-shrink-0" aria-hidden="true" />}{entry.name}{unavailable ? " (unavailable)" : ""}</button>
                 {entry.size !== undefined && <span className="lib-text-xs lib-text-muted-foreground">{bytes(entry.size)}</span>}
                 {date && Number.isFinite(date.getTime()) && <time className="lib-text-xs lib-text-muted-foreground" dateTime={date.toISOString()}>{date.toLocaleDateString()}</time>}
               </div>

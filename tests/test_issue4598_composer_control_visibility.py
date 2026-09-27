@@ -1,19 +1,47 @@
-"""Static-contract regression tests for the composer footer-control visibility
-toggles (#4598).
+"""Static-contract regression tests for composer footer-control visibility and ordering.
 
-Mirrors the sibling pattern in test_sidebar_tab_visibility.py: pins that each
-toggle is wired end-to-end (config boolean key -> boot.js definition + read-back
--> index.html control -> panels.js chip render -> apply) and that every new i18n
-key exists across all locale blocks, so a future refactor can't silently orphan
-a control or break locale parity.
+The settings surface is rendered by the React Appearance pane, while panels.js
+owns persistence and the runtime visibility state.
 """
 import json
 import shutil
 import subprocess
 import textwrap
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
+
+
+class _ComposerRightParser(HTMLParser):
+    VOID_ELEMENTS = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+        self.children = []
+
+    def handle_starttag(self, tag, attributes):
+        attrs = dict(attributes)
+        if self.stack and "composer-right" in self.stack[-1]["classes"].split():
+            self.children.append({"tag": tag, "id": attrs.get("id", ""), "classes": attrs.get("class", "")})
+        frame = {"tag": tag, "classes": attrs.get("class", "")}
+        if tag not in self.VOID_ELEMENTS:
+            self.stack.append(frame)
+
+    def handle_startendtag(self, tag, attributes):
+        self.handle_starttag(tag, attributes)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index]["tag"] == tag:
+                del self.stack[index:]
+                break
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
@@ -21,6 +49,7 @@ PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+SETTINGS_PANES = (ROOT / "frontend" / "settings" / "SettingsPanes.tsx").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 # The 15 composer-control visibility flags this feature ships.
@@ -122,7 +151,7 @@ def test_composer_control_order_frontend_contracts():
     assert "_moveComposerControlOrderKey" in PANELS_JS
     assert "_composerControlDropAllowed" in PANELS_JS
     assert "_renderComposerSituationalControlChips" in PANELS_JS
-    assert "composerSituationalControlsChips" in PANELS_JS
+    assert "composerSituationalControlsChips" in SETTINGS_PANES
     assert "#composerControlsChips .tab-visibility-chip" in STYLE_CSS
     assert "#composerSituationalControlsChips .tab-visibility-chip" in STYLE_CSS
 
@@ -130,7 +159,9 @@ def test_composer_control_order_frontend_contracts():
     render_situational = _extract_function(PANELS_JS, "_renderComposerSituationalControlChips")
     for body in (render_primary, render_situational):
         assert "_orderedComposerControlDefsForSettings" in body
-        assert "_wireComposerControlChipDrag" in body
+    assert "draggable={!item.locked}" in SETTINGS_PANES
+    assert "onDrop={e =>" in SETTINGS_PANES
+    assert "move(source, item.id)" in SETTINGS_PANES
 
     move_body = _extract_function(PANELS_JS, "_moveComposerControlOrderKey")
     assert "_renderComposerControlChips()" in move_body
@@ -149,8 +180,8 @@ def test_new_i18n_keys_exist_across_all_locale_blocks():
             f"block) for strict locale parity"
         )
 
-    assert "Drag chips to reorder each footer group." in INDEX_HTML
-    assert "Reordering is not supported." not in INDEX_HTML
+    assert "Drag chips to reorder each footer group." in SETTINGS_PANES
+    assert "Reordering is not supported." not in SETTINGS_PANES
     assert "Reordering is not supported." not in I18N_JS
     assert "不支持重新排序" not in I18N_JS
 
@@ -247,3 +278,28 @@ def test_composer_control_order_move_updates_both_chip_groups():
     )
     result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_profile_workspace_and_mic_are_grouped_before_send():
+    parser = _ComposerRightParser()
+    parser.feed(INDEX_HTML)
+
+    controls = [
+        next(
+            (index for index, child in enumerate(parser.children) if selector(child)),
+            -1,
+        )
+        for selector in (
+            lambda child: child["id"] == "btnMic",
+            lambda child: child["id"] == "profileChipWrap",
+            lambda child: "composer-ws-wrap" in child["classes"].split(),
+            lambda child: child["id"] == "btnSend",
+        )
+    ]
+
+    assert all(index >= 0 for index in controls), (
+        "Mic, profile, workspace, and send controls must all be in .composer-right"
+    )
+    assert controls == list(range(controls[0], controls[0] + len(controls))), (
+        "Mic, profile, and workspace must stay together immediately before Send"
+    )

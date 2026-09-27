@@ -1,6 +1,7 @@
 import * as React from "react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
-import { X } from "lucide-react"
+import { HugeiconsIcon } from "@hugeicons/react"
+import { Cancel01Icon } from "@hugeicons/core-free-icons"
 
 import { cn } from "@/lib/cn"
 
@@ -42,11 +43,11 @@ const DialogContent = React.forwardRef<
       )}
       {...props}
     >
-      {children}
       <DialogPrimitive.Close className="lib-absolute lib-right-2 lib-top-2 lib-flex lib-size-11 lib-items-center lib-justify-center lib-rounded-sm lib-opacity-70 lib-ring-offset-background lib-transition-opacity hover:lib-opacity-100 focus:lib-outline-none focus:lib-ring-2 focus:lib-ring-ring focus:lib-ring-offset-2 disabled:lib-pointer-events-none data-[state=open]:lib-bg-accent data-[state=open]:lib-text-muted-foreground">
-        <X className="lib-h-4 lib-w-4" />
+        <HugeiconsIcon icon={Cancel01Icon} className="lib-h-4 lib-w-4" aria-hidden="true" />
         <span className="lib-sr-only">Close</span>
       </DialogPrimitive.Close>
+      {children}
     </DialogPrimitive.Content>
     </div>
   </DialogPortal>

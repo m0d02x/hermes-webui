@@ -218,3 +218,5 @@
   .settings-scope .settings-aux-row { grid-template-columns: 1fr 1fr; }
   .settings-scope .settings-aux-label { grid-column: 1 / -1; }
 }
+.lib-scope .library-folder-icon { color: var(--folder-icon-color, var(--accent)); }
+.lib-scope .library-file-icon { color: var(--muted); }

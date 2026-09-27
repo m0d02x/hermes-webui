@@ -75,6 +75,31 @@ install. For example, Desktop Companion can install the WebUI bridge from the
 gallery, but the desktop pet is only visible after the local Desktop Companion
 app is started.
 
+### React Grab for local development
+
+[React Grab](https://www.react-grab.com/) is a pinned development dependency.
+From the repository root, install dependencies with `npm ci`, then opt in when
+starting a local development instance:
+
+```bash
+HERMES_WEBUI_EXTENSION_DIR="$PWD/node_modules/react-grab/dist" \
+HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/index.global.js \
+./start.sh
+```
+
+Use the toolbar's **Copy element** button, then click an element to copy its
+context. React Grab also supports holding **Ctrl+C** (**Cmd+C** on macOS) while
+hovering an element. Legacy UI elements provide HTML/selector context; React
+component names and source locations depend on the build's debug information.
+
+The script is served locally, not fetched from a CDN. It is not included in the
+production Library bundle or enabled on ordinary startup. Omit these environment
+variables on the next launch to disable it. This example overrides the extension
+directory, so use a separate development instance rather than replacing an
+existing extension setup. The full-session trust warning above applies. For
+isolated trials, follow the
+[agent-assisted onboarding checklist](onboarding-agent-checklist.md).
+
 ### Manual / advanced configuration (optional)
 
 `HERMES_WEBUI_EXTENSION_DIR` is **optional** and overrides the managed default.

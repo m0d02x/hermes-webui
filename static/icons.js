@@ -1,8 +1,6 @@
-// ── Lucide icon library (self-hosted SVG paths, no CDN dependency) ──────────
-// All icons are 24×24 viewBox, stroke-based, currentColor.
-// Usage: li('folder')  →  returns a ready-to-embed SVG string
-// The returned SVG uses display:inline-block + vertical-align so it sits
-// neatly beside text in both HTML templates and innerHTML assignments.
+// Hugeicons render data is generated offline from the installed official package.
+// Use li() for the remaining legacy glyphs; only the folder icon is migrated here.
+
 
 const LI_PATHS = {
   // Navigation tabs
@@ -10,7 +8,7 @@ const LI_PATHS = {
   'calendar':        '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   'layers':          '<path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>',
   'lightbulb':       '<path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.2 6H8.2C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="17" x2="15" y2="17"/><line x1="10" y1="20" x2="14" y2="20"/>',
-  'folder':          '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+  // folder is supplied by the generated Hugeicons map below
   'link':            '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   'external-link':   '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
   'list-todo':       '<rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
@@ -80,16 +78,39 @@ const LI_PATHS = {
 };
 
 /**
- * Returns a Lucide SVG string for the given icon name.
- * @param {string} name  – key in LI_PATHS (e.g. 'folder', 'trash-2')
- * @param {number} size  – width/height in px (default 16)
- * @returns {string} SVG element string ready for innerHTML
+ * Returns a compact SVG using generated Hugeicons data for selected icons and
+ * the existing inline path map for all other callers.
  */
+function hugeicon(name, size = 16, className = '') {
+  const markup = window.HUGEICONS && window.HUGEICONS[name];
+  if (!markup) return '';
+  const klass = className ? ` class="${className}"` : '';
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" aria-hidden="true"${klass} style="display:inline-block;vertical-align:-0.15em;flex-shrink:0">${markup}</svg>`;
+}
+
 function li(name, size = 16) {
+  if (name === 'folder') return hugeicon('folder', size, 'folder-icon');
   const p = LI_PATHS[name];
   if (!p) { console.warn('li(): unknown icon', name); return ''; }
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" `
        + `stroke="currentColor" stroke-width="2" stroke-linecap="round" `
        + `stroke-linejoin="round" aria-hidden="true" `
        + `style="display:inline-block;vertical-align:-0.15em;flex-shrink:0">${p}</svg>`;
+}
+
+function hydrateHugeiconMarkers() {
+  document.querySelectorAll('svg[data-hugeicon]').forEach((marker) => {
+    const markup = window.HUGEICONS && window.HUGEICONS[marker.dataset.hugeicon];
+    if (!markup) return;
+    marker.setAttribute('viewBox', '0 0 24 24');
+    marker.setAttribute('fill', 'none');
+    marker.setAttribute('aria-hidden', 'true');
+    marker.innerHTML = markup;
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', hydrateHugeiconMarkers, { once: true });
+} else {
+  hydrateHugeiconMarkers();
 }
