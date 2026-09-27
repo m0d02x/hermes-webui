@@ -2856,18 +2856,13 @@ function _applySkin(name){
 }
 
 function _pickTheme(name){
-  const currentSkin=localStorage.getItem('hermes-skin');
-  const appearance=_normalizeAppearance(name,currentSkin);
+  const appearance=_normalizeAppearance(name,localStorage.getItem('hermes-skin'));
   localStorage.setItem('hermes-theme',appearance.theme);
   localStorage.setItem('hermes-skin',appearance.skin);
   _applyTheme(appearance.theme);
   _applySkin(appearance.skin);
   _syncThemePicker(appearance.theme);
   _syncSkinPicker(appearance.skin);
-  const hidden=$('settingsTheme');
-  if(hidden) hidden.value=appearance.theme;
-  const skinHidden=$('settingsSkin');
-  if(skinHidden) skinHidden.value=appearance.skin;
   if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
@@ -2879,27 +2874,15 @@ function _pickSkin(name){
   _applySkin(appearance.skin);
   _syncThemePicker(appearance.theme);
   _syncSkinPicker(appearance.skin);
-  const hidden=$('settingsSkin');
-  if(hidden) hidden.value=appearance.skin;
-  const themeHidden=$('settingsTheme');
-  if(themeHidden) themeHidden.value=appearance.theme;
   if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _syncThemePicker(active){
-  document.querySelectorAll('#themePickerGrid .theme-pick-btn').forEach(btn=>{
-    btn.classList.toggle('active',btn.dataset.themeVal===active);
-    btn.style.borderColor='';
-    btn.style.boxShadow='';
-  });
+  if(window.settingsHost) window.settingsHost.setPickerState({theme:active});
 }
 
 function _syncSkinPicker(active){
-  document.querySelectorAll('#skinPickerGrid .skin-pick-btn').forEach(btn=>{
-    btn.classList.toggle('active',btn.dataset.skinVal===active);
-    btn.style.borderColor='';
-    btn.style.boxShadow='';
-  });
+  if(window.settingsHost) window.settingsHost.setPickerState({skin:active});
 }
 
 function _applyFontSize(size){
@@ -2914,52 +2897,26 @@ function _pickFontSize(size){
   localStorage.setItem('hermes-font-size',size);
   _applyFontSize(size);
   _syncFontSizePicker(size);
-  const hidden=$('settingsFontSize');
-  if(hidden) hidden.value=size;
   if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _syncFontSizePicker(active){
-  document.querySelectorAll('#fontSizePickerGrid .font-size-pick-btn').forEach(btn=>{
-    btn.classList.toggle('active',btn.dataset.fontSizeVal===(active||'default'));
-    btn.style.borderColor='';
-    btn.style.boxShadow='';
-  });
+  if(window.settingsHost) window.settingsHost.setPickerState({fontSize:active||'default'});
 }
 
 function _buildSkinPicker(activeSkin){
-  const grid=$('skinPickerGrid');
-  if(!grid) return;
-  grid.innerHTML='';
-  for(const skin of _SKINS){
-    const key=(skin.value||skin.name).toLowerCase();
-    const btn=document.createElement('button');
-    btn.type='button';
-    btn.className='skin-pick-btn';
-    btn.dataset.skinVal=key;
-    btn.style.cssText='border:1px solid var(--border2);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;background:none;transition:all .15s';
-    btn.onclick=()=>_pickSkin(key);
-    // Build with DOM nodes + textContent so an extension-registered skin's
-    // label/name (registerHermesSkin descriptor) can never inject markup into
-    // the picker. Swatch colors are already value-sanitized upstream, but set
-    // them via element.style.background (not interpolated HTML) as defense in depth.
-    const dotRow=document.createElement('div');
-    dotRow.style.cssText='display:flex;gap:3px;justify-content:center;margin-bottom:4px';
-    for(const c of (skin.colors||[])){
-      const dot=document.createElement('span');
-      dot.style.cssText='display:inline-block;width:10px;height:10px;border-radius:50%';
-      dot.style.background=c;
-      dotRow.appendChild(dot);
-    }
-    const labelEl=document.createElement('span');
-    labelEl.style.cssText='font-size:11px;color:var(--text)';
-    labelEl.textContent=skin.label||skin.name||'';
-    btn.appendChild(dotRow);
-    btn.appendChild(labelEl);
-    grid.appendChild(btn);
+  if(window.settingsHost){
+    window.settingsHost.setSkinOptions(_SKINS.map(skin=>({
+      value:(skin.value||skin.name).toLowerCase(),
+      label:skin.label||skin.name||'',
+      colors:Array.isArray(skin.colors)?skin.colors.slice():[],
+    })));
+    window.settingsHost.setPickerState({skin:(activeSkin||'default').toLowerCase()});
   }
-  _syncSkinPicker((activeSkin||'default').toLowerCase());
 }
+window.addEventListener('hermes-settings:pick-theme',event=>_pickTheme(event.detail.value));
+window.addEventListener('hermes-settings:pick-skin',event=>_pickSkin(event.detail.value));
+window.addEventListener('hermes-settings:pick-font-size',event=>_pickFontSize(event.detail.value));
 
 // ── Extension-registered skins (theme-registration capability) ───────────────
 // Lets a trusted local extension contribute a custom skin that appears in the

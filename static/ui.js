@@ -3067,6 +3067,13 @@ function _providerDefersMissingModelFallback(providerId){
 function _modelStateForSelect(sel, modelId){
   const value=String(modelId||'').trim();
   if(!value) return {model:'',model_provider:null};
+  if(sel&&sel.id==='settingsModel'){
+    const selected=sel.selectedOptions&&sel.selectedOptions[0];
+    if(selected&&String(selected.value||'')===value&&selected.dataset&&selected.dataset.model){
+      const provider=String(_getOptionProviderId(selected)||'').trim();
+      return {model:String(selected.dataset.model),model_provider:provider&&provider!=='default'?provider:null};
+    }
+  }
   const explicitProvider=_providerFromModelValue(value);
   if(explicitProvider){
     const selected=sel&&sel.options
@@ -3452,26 +3459,53 @@ function _refreshOpenModelDropdown(){
     renderModelDropdown();
     if(typeof _positionModelDropdown==='function') _positionModelDropdown();
   }
-  const sdd=$('settingsModelDropdown');
-  if(sdd&&sdd.classList&&sdd.classList.contains('open')&&typeof renderModelDropdown==='function'){
-    // Re-rendering the OPEN settings picker (e.g. when a late live-model fetch
-    // resolves) must not re-grab search focus on touch — same coarse-pointer rule
-    // as openSettingsModelDropdown, or the mobile keyboard pops after opening.
-    const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
-    renderModelDropdown({
-      dropdownId:'settingsModelDropdown',
-      selectId:'settingsModel',
-      forceOpenKey:'settingsModel',
-      closeDropdown:closeSettingsModelDropdown,
-      selectModel:selectSettingsModelFromDropdown,
-      scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-      autoFocusSearch:!_coarsePointer,
-    });
-  }
 }
+function _publishSettingsModel(modelId,providerId){
+  if(!window.settingsHost) return null;
+  const snapshot=window.settingsHost.getSnapshot();
+  const raw=String(modelId||'').trim();
+  const explicitProvider=_providerFromModelValue(raw);
+  const provider=String(providerId||explicitProvider||window._activeProvider||'').trim();
+  const bareModel=explicitProvider&&raw.toLowerCase().startsWith(`@${explicitProvider}:`.toLowerCase())
+    ?raw.slice(explicitProvider.length+2)
+    :raw;
+  const options=snapshot.preferencesOptions.models.slice();
+  let option=options.find(item=>item.value===raw
+    &&(!provider||String(item.provider||'').toLowerCase()===provider.toLowerCase()))
+    ||options.find(item=>(item.model||item.value)===bareModel
+      &&(!provider||String(item.provider||'').toLowerCase()===provider.toLowerCase()));
+  if(!option&&!provider){
+    const matches=options.filter(item=>item.value===raw||(item.model||item.value)===bareModel);
+    if(matches.length===1) option=matches[0];
+  }
+  if(!option){
+    const actualProvider=provider||_providerFromModelValue(raw)||'';
+    const actualModel=raw.startsWith('@'+actualProvider+':')?raw.slice(actualProvider.length+2):raw;
+    option={
+      value:actualProvider&&!raw.startsWith('@')?`@${actualProvider}:${raw}`:raw,
+      model:actualModel,
+      provider:actualProvider||undefined,
+      label:(typeof getModelLabel==='function'?getModelLabel(raw):raw)+' (configured)',
+    };
+    options.push(option);
+  }
+  window.settingsHost.setSnapshot({
+    ...snapshot,
+    preferences:{
+      ...snapshot.preferences,
+      settingsModel:option.model||option.value,
+      settingsModelProvider:option.provider||'',
+      settingsModelChip:option.label,
+    },
+    preferencesOptions:{...snapshot.preferencesOptions,models:options},
+  });
+  return option.value;
+}
+
 function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
   if(!modelId||!sel) return null;
-  const isRichPickerSelect=sel.id==='modelSelect'||sel.id==='settingsModel';
+  if(sel.id==='settingsModel') return _publishSettingsModel(modelId,preferredProviderId);
+  const isRichPickerSelect=sel.id==='modelSelect';
   const currentState=(isRichPickerSelect&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, sel.value)
     : null;
@@ -3496,7 +3530,6 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId, opts){
         || String(currentState.model||'')!==String(resolvedState.model||'')
         || String(currentState.model_provider||'')!==String(resolvedState.model_provider||'');
       if(sel.id==='modelSelect'&&typeof syncModelChip==='function') syncModelChip();
-      if(sel.id==='settingsModel'&&typeof syncSettingsModelChip==='function') syncSettingsModelChip();
       if(pickerChanged) _refreshOpenModelDropdown();
     }
     return resolved;
@@ -3535,10 +3568,6 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   sel.value=value;
   if(sel.id==='modelSelect'){
     if(typeof syncModelChip==='function') syncModelChip();
-    _refreshOpenModelDropdown();
-  }
-  if(sel.id==='settingsModel'){
-    if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
     _refreshOpenModelDropdown();
   }
   return value;
@@ -4936,101 +4965,6 @@ function closeModelDropdown(){
   if(typeof _restoreModelDropdownHome==='function') _restoreModelDropdownHome();
 }
 
-function closeSettingsModelDropdown(){
-  const dd=$('settingsModelDropdown');
-  const chip=$('settingsModelChip');
-  if(dd) dd.classList.remove('open');
-  if(chip){
-    chip.classList.remove('active');
-    chip.setAttribute('aria-expanded','false');
-  }
-}
-
-function syncSettingsModelChip(){
-  const sel=$('settingsModel');
-  const chip=$('settingsModelChip');
-  if(!sel||!chip) return;
-  const opt=sel.selectedOptions&&sel.selectedOptions[0];
-  const text=(opt&&opt.textContent)||getModelLabel(sel.value||'')||t('settings_label_model')||'Default Model';
-  chip.textContent=text;
-  chip.title=sel.value||text;
-}
-
-function selectSettingsModelFromDropdown(value,preferredProviderId){
-  const sel=$('settingsModel');
-  if(!sel){closeSettingsModelDropdown();return;}
-  const provider=String(preferredProviderId||'').trim()||null;
-  if(typeof _ensureModelOptionInDropdown==='function'){
-    _ensureModelOptionInDropdown(value,sel,provider);
-  }else{
-    sel.value=value;
-    if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();
-  }
-  closeSettingsModelDropdown();
-  try{
-    if(typeof Event==='function') sel.dispatchEvent(new Event('change',{bubbles:true}));
-    else if(typeof sel.onchange==='function') sel.onchange();
-  }catch(_){}
-}
-
-function openSettingsModelDropdown(){
-  const dd=$('settingsModelDropdown');
-  const sel=$('settingsModel');
-  const chip=$('settingsModelChip');
-  if(!dd||!sel) return;
-  // Auto-focus the search on desktop only. On touch (coarse pointer) grabbing focus
-  // pops the on-screen keyboard the instant the chip is tapped — the composer picker
-  // doesn't do it either, so match that behavior on touch. Computed before render so
-  // renderModelDropdown's own initial focus is suppressed too (not just the outer one).
-  const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
-  renderModelDropdown({
-    dropdownId:'settingsModelDropdown',
-    selectId:'settingsModel',
-    forceOpenKey:'settingsModel',
-    closeDropdown:closeSettingsModelDropdown,
-    selectModel:selectSettingsModelFromDropdown,
-    scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-    autoFocusSearch:!_coarsePointer,
-  });
-  dd.classList.add('open');
-  if(chip){
-    chip.classList.add('active');
-    chip.setAttribute('aria-expanded','true');
-  }
-  if(!_coarsePointer){
-    setTimeout(()=>{
-      const input=dd.querySelector('.model-search-input');
-      if(input) input.focus();
-    },0);
-  }
-}
-
-function toggleSettingsModelDropdown(){
-  const dd=$('settingsModelDropdown');
-  if(dd&&dd.classList.contains('open')){closeSettingsModelDropdown();return;}
-  openSettingsModelDropdown();
-}
-
-function mountSettingsModelPicker(){
-  const chip=$('settingsModelChip');
-  const sel=$('settingsModel');
-  if(!chip||!sel) return;
-  syncSettingsModelChip();
-  if(!chip._settingsModelPickerBound){
-    chip._settingsModelPickerBound=true;
-    chip.addEventListener('click',e=>{
-      e.preventDefault();
-      e.stopPropagation();
-      toggleSettingsModelDropdown();
-    });
-    chip.addEventListener('keydown',e=>{
-      if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
-        e.preventDefault();
-        toggleSettingsModelDropdown();
-      }
-    });
-  }
-}
 
 document.addEventListener('click',e=>{
   if(
@@ -5038,11 +4972,6 @@ document.addEventListener('click',e=>{
     !e.target.closest('#composerMobileModelAction') &&
     !e.target.closest('#composerModelDropdown')
   ) closeModelDropdown();
-  if(
-    !e.target.closest('#settingsModelChip') &&
-    !e.target.closest('#settingsModel') &&
-    !e.target.closest('#settingsModelDropdown')
-  ) closeSettingsModelDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');

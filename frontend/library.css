@@ -37,6 +37,7 @@
 #panelLibrary { overflow-y: auto; }
 .lib-scope a { color: var(--lib-foreground); }
 .lib-scope :is(button, a, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lib-scope [hidden] { display: none !important; }
  
 /* Keep shell element defaults from changing Tailwind primitives. */
 .lib-scope,
@@ -102,4 +103,118 @@
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+.settings-scope {
+  min-width: 0;
+  color: var(--text);
+}
+.settings-scope .settings-react-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+.settings-scope .theme-pick-btn,
+.settings-scope .font-size-pick-btn,
+.settings-scope .skin-pick-btn {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: center;
+}
+.settings-scope :is(.theme-pick-btn, .font-size-pick-btn, .skin-pick-btn).active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.settings-scope .settings-theme-preview {
+  display: block;
+  width: 100%;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.settings-scope .settings-theme-preview.light { background: #fff; }
+.settings-scope .settings-theme-preview.dark { background: #1a1a2e; }
+.settings-scope .settings-theme-preview.system { background: linear-gradient(90deg, #fff 50%, #1a1a2e 50%); }
+.settings-scope .settings-font-preview { color: var(--muted); font-weight: 600; }
+.settings-scope .settings-react-input,
+.settings-scope .settings-react-select {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--text);
+}
+.settings-scope .settings-react-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.settings-scope .settings-react-check input {
+  width: 15px;
+  height: 15px;
+  min-height: 15px;
+  accent-color: var(--accent);
+}
+.settings-scope .settings-react-check-indent { margin-left: 24px; }
+.settings-scope .settings-desc {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.settings-scope .settings-range-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+.settings-scope .settings-range-row input { flex: 1; accent-color: var(--accent); }
+.settings-scope .settings-range-row span {
+  min-width: 36px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+.settings-scope .settings-aux-models { display: grid; gap: 8px; }
+.settings-scope .settings-aux-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr) 36px;
+  align-items: center;
+  gap: 8px;
+}
+.settings-scope .settings-aux-label { font-size: 12px; font-weight: 500; line-height: 1.3; }
+.settings-scope .settings-aux-label small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+.settings-scope .settings-react-save {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.settings-scope .settings-react-save:hover { background: var(--accent-hover); }
+@media (max-width: 640px) {
+  .settings-scope .settings-aux-row { grid-template-columns: 1fr 1fr; }
+  .settings-scope .settings-aux-label { grid-column: 1 / -1; }
 }

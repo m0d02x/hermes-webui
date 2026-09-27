@@ -6599,6 +6599,7 @@ async function _profileSwitchPanelLoad(){
   if (_currentPanel === 'profiles') await loadProfilesPanel();
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
   if (_currentPanel === 'library') await loadLibrary();
+  if (_currentPanel === 'settings') await loadSettingsPanel();
 }
 
 function _refreshProfileSwitchBackground(gen){
@@ -7000,6 +7001,10 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  if (window.settingsHost) {
+    const currentSettings = window.settingsHost.getSnapshot();
+    window.settingsHost.setSnapshot({...currentSettings, loaded:false, loadError:''});
+  }
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
@@ -7287,6 +7292,9 @@ async function switchToProfile(name) {
     }
     return false;
   } finally {
+    if (_switchGen === _profileSwitchGeneration && _currentPanel === 'settings' && window.settingsHost && !window.settingsHost.getSnapshot().loaded) {
+      await loadSettingsPanel();
+    }
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
     if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
@@ -7533,6 +7541,8 @@ let _settingsSkinOnOpen = null; // track skin at open time for discard revert
 let _settingsFontSizeOnOpen = null; // track font size at open time for discard revert
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsHermesDefaultModelProviderOnOpen = null;
+let _settingsModelEditSeq=0;
+let _settingsModelOptions=[];
 let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
 let _settingsIndex = null;
@@ -7677,40 +7687,17 @@ function _applyTabVisibility(hidden){
 }
 
 function _renderTabVisibilityChips(){
-  var container=$('tabVisibilityChips');
-  if(!container)return;
-  var hidden=_getHiddenTabs();
-  var panels=_orderedSidebarPanels();
-  container.innerHTML='';
-  panels.forEach(function(panel){
-    var tab=document.querySelector('.rail .rail-btn.nav-tab[data-panel="'+panel+'"]')
+  if(!window.settingsHost) return;
+  const hidden=_getHiddenTabs();
+  const panels=_orderedSidebarPanels();
+  const tabs=panels.map((panel,order)=>{
+    const tab=document.querySelector('.rail .rail-btn.nav-tab[data-panel="'+panel+'"]')
       ||document.querySelector('.sidebar-nav .nav-tab[data-panel="'+panel+'"]');
-    var label=(tab&&(tab.dataset.tooltip||tab.dataset.label))||panel;
-    // Capitalize first letter
-    label=label.charAt(0).toUpperCase()+label.slice(1);
-    var chip=document.createElement('button');
-    chip.type='button';
-    chip.className='tab-visibility-chip';
-    var isOff=hidden.indexOf(panel)!==-1;
-    if(isOff)chip.classList.add('chip-off');
-    chip.textContent=label;
-    chip.setAttribute('data-tab-panel',panel);
-    chip.setAttribute('draggable','true');
-    // Use role="switch" + aria-checked instead of aria-pressed so screen
-    // readers narrate "Tasks switch on/off" (matches user mental model) rather
-    // than "Tasks toggle button pressed/not-pressed" (where the polarity is
-    // confusing because chip-off looks like the "off" state).
-    chip.setAttribute('role','switch');
-    chip.setAttribute('aria-checked',isOff?'false':'true');
-    chip.onclick=function(){
-      if(Date.now()<_tabVisibilityDragSuppressUntil)return;
-      _toggleTabVisibilityChip(panel);
-    };
-    _wireTabChipDrag(chip,panel);
-    container.appendChild(chip);
+    const label=(tab&&(tab.dataset.tooltip||tab.dataset.label))||panel;
+    return {id:panel,label:label.charAt(0).toUpperCase()+label.slice(1),visible:hidden.indexOf(panel)===-1,order,locked:_ALWAYS_VISIBLE_TABS.has(panel)};
   });
-  var dashboardChip=_renderDashboardVisibilityChip(container);
-  if(dashboardChip) container.appendChild(dashboardChip);
+  tabs.push({id:'__hermes_dashboard__',label:typeof t==='function'?t('tab_dashboard'):'Dashboard',visible:_isDashboardChipOn(),order:tabs.length,locked:true});
+  window.settingsHost.setChipState({tabs});
 }
 
 function _wireTabChipDrag(chip,panel){
@@ -7929,45 +7916,25 @@ function _composerControlChipLabel(def){
 }
 
 function _renderComposerControlChips(){
-  const container=$('composerControlsChips');
-  if(!container) return;
+  if(!window.settingsHost) return;
   const defs=Array.isArray(window._COMPOSER_CONTROL_TOGGLE_DEFS)?window._COMPOSER_CONTROL_TOGGLE_DEFS:[];
   const state=window._composerControlVisibility||{};
-  container.innerHTML='';
-  _orderedComposerControlDefsForSettings(defs).forEach(function(def){
-    const chip=document.createElement('button');
-    chip.type='button';
-    chip.className='tab-visibility-chip';
-    const hidden=!!state[def.key];
-    if(hidden) chip.classList.add('chip-off');
-    chip.textContent=_composerControlChipLabel(def);
-    chip.setAttribute('role','switch');
-    chip.setAttribute('aria-checked',hidden?'false':'true');
-    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};
-    _wireComposerControlChipDrag(chip,def.key);
-    container.appendChild(chip);
-  });
+  const order=_getComposerControlOrder();
+  const ordered=_orderedComposerControlDefsForSettings(defs);
+  window.settingsHost.setChipState({composerControls:ordered.map((def,index)=>({
+    id:def.key,label:_composerControlChipLabel(def),visible:!state[def.key],order:order.indexOf(def.key)===-1?index:order.indexOf(def.key),orderGroup:def.orderGroup||'',
+  }))});
 }
 
 function _renderComposerSituationalControlChips(){
-  const container=$('composerSituationalControlsChips');
-  if(!container) return;
+  if(!window.settingsHost) return;
   const defs=Array.isArray(window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS)?window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS:[];
   const state=window._composerControlVisibility||{};
-  container.innerHTML='';
-  _orderedComposerControlDefsForSettings(defs).forEach(function(def){
-    const chip=document.createElement('button');
-    chip.type='button';
-    chip.className='tab-visibility-chip';
-    const hidden=!!state[def.key];
-    if(hidden) chip.classList.add('chip-off');
-    chip.textContent=_composerControlChipLabel(def);
-    chip.setAttribute('role','switch');
-    chip.setAttribute('aria-checked',hidden?'false':'true');
-    chip.onclick=function(){if(Date.now()<_composerControlDragSuppressUntil)return;_toggleComposerControlChip(def.key);};
-    _wireComposerControlChipDrag(chip,def.key);
-    container.appendChild(chip);
-  });
+  const order=_getComposerControlOrder();
+  const ordered=_orderedComposerControlDefsForSettings(defs);
+  window.settingsHost.setChipState({situationalControls:ordered.map((def,index)=>({
+    id:def.key,label:_composerControlChipLabel(def),visible:!state[def.key],order:order.indexOf(def.key)===-1?index:order.indexOf(def.key),orderGroup:def.orderGroup||'',
+  }))});
 }
 
 function switchSettingsSection(name,opts){
@@ -8443,11 +8410,20 @@ function _applyTtsEnabled(enabled){
 // Read + sanitize the JSON/YAML structured code-block default-view controls
 // (#484). mode is one of auto|on|off; lines is clamped to an int 1..1000 with a
 // fallback of 10 (the original hardcoded threshold).
+function _settingsValue(pane,id){
+  const state=window.settingsHost.getSnapshot()[pane];
+  if(!Object.prototype.hasOwnProperty.call(state,id)) throw new Error('Missing settings control state: '+id);
+  return state[id];
+}
+function _settingsChecked(pane,id){
+  const value=_settingsValue(pane,id);
+  if(typeof value!=='boolean') throw new Error('Invalid checkbox state: '+id);
+  return value;
+}
 function _structuredCodeViewFromUi(){
-  const modeSel=$('settingsStructuredCodeMode');
-  const mode=modeSel&&['auto','on','off'].includes(modeSel.value)?modeSel.value:'auto';
-  const linesField=$('settingsStructuredCodeAutoLines');
-  const n=parseInt((linesField||{}).value,10);
+  const rawMode=_settingsValue('appearance','settingsStructuredCodeMode');
+  const mode=['auto','on','off'].includes(rawMode)?rawMode:'auto';
+  const n=parseInt(_settingsValue('appearance','settingsStructuredCodeAutoLines'),10);
   const lines=(Number.isFinite(n)&&n>=1&&n<=1000)?n:10;
   return {structured_code_default_view:mode,structured_code_auto_tree_lines:lines};
 }
@@ -8465,73 +8441,51 @@ function _applyStructuredCodeViewSettings(mode,lines,rerender){
   }
 }
 
-// The Auto-threshold input is only meaningful in 'auto' mode; disable it
-// otherwise so the control reads as inactive without hiding it.
-function _syncStructuredCodeLinesEnabled(){
-  const modeSel=$('settingsStructuredCodeMode');
-  const linesField=$('settingsStructuredCodeAutoLines');
-  // Both controls live in the same settings-field and are present together;
-  // if either is missing there's nothing to sync.
-  if(!modeSel||!linesField) return;
-  const isAuto=modeSel.value==='auto';
-  linesField.disabled=!isAuto;
-  linesField.style.opacity=isAuto?'':'0.5';
-}
 
 function _appearancePayloadFromUi(){
-  const worklogDetailsExpanded=!!($('settingsWorklogDetailsExpandedDefault')||{}).checked;
-  const chatActivityModeSel=$('settingsChatActivityDisplayMode');
-  const transparentEventTimestamps=$('settingsTransparentEventTimestamps');
+  const mode=_settingsValue('appearance','settingsChatActivityDisplayMode');
+  const worklog=_settingsChecked('appearance','settingsWorklogDetailsExpandedDefault');
   return {
-    theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
-    skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
-    font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
-    chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')
-      ? chatActivityModeSel.value
-      : 'compact_worklog',
-    transparent_stream_event_timestamps: transparentEventTimestamps ? transparentEventTimestamps.checked : true,
-    session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
-    session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
-    auto_scroll_follow: !!($('settingsAutoScrollFollow')||{}).checked,
-    render_user_markdown: !!($('settingsRenderUserMarkdown')||{}).checked,
-    large_text_paste_as_attachment: !!($('settingsLargeTextPasteAsAttachment')||{}).checked,
-    project_quick_create_buttons: !!($('settingsProjectQuickCreate')||{}).checked,
+    theme:_settingsValue('appearance','settingsTheme'),
+    skin:_settingsValue('appearance','settingsSkin'),
+    font_size:_settingsValue('appearance','settingsFontSize'),
+    chat_activity_display_mode:mode==='transparent_stream'||mode==='hide_all_activity'?mode:'compact_worklog',
+    transparent_stream_event_timestamps:_settingsChecked('appearance','settingsTransparentEventTimestamps'),
+    session_jump_buttons:_settingsChecked('appearance','settingsSessionJumpButtons'),
+    session_endless_scroll:_settingsChecked('appearance','settingsSessionEndlessScroll'),
+    auto_scroll_follow:_settingsChecked('appearance','settingsAutoScrollFollow'),
+    render_user_markdown:_settingsChecked('appearance','settingsRenderUserMarkdown'),
+    large_text_paste_as_attachment:_settingsChecked('appearance','settingsLargeTextPasteAsAttachment'),
+    project_quick_create_buttons:_settingsChecked('appearance','settingsProjectQuickCreate'),
     ..._structuredCodeViewFromUi(),
-    show_titlebar_profile: !!($('settingsShowTitlebarProfile')||{}).checked,
-    worklog_details_expanded_default: worklogDetailsExpanded,
-    activity_feed_expanded_default: worklogDetailsExpanded,
+    show_titlebar_profile:_settingsChecked('appearance','settingsShowTitlebarProfile'),
+    worklog_details_expanded_default:worklog,
+    activity_feed_expanded_default:worklog,
     ..._composerControlVisibilityPayload(),
-    composer_control_order: _getComposerControlOrder(),
-    hidden_tabs: _getHiddenTabs(),
-    tab_order: _getTabOrder(),
+    composer_control_order:_getComposerControlOrder(),
+    hidden_tabs:_getHiddenTabs(),
+    tab_order:_getTabOrder(),
   };
+}
+
+function _publishSettingsAppearance(patch){
+  const current=window.settingsHost.getSnapshot();
+  window.settingsHost.setSnapshot({...current,appearance:{...current.appearance,...patch}});
 }
 
 function _syncChatActivityDisplayModeControl(mode){
   const next=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : 'compact_worklog';
-  const select=$('settingsChatActivityDisplayMode');
-  if(select) select.value=next;
-  document.querySelectorAll('[data-chat-activity-mode]').forEach(btn=>{
-    const active=btn.getAttribute('data-chat-activity-mode')===next;
-    btn.classList.toggle('active',active);
-    btn.setAttribute('aria-pressed',active?'true':'false');
-  });
   window._chatActivityDisplayMode=next;
   window._transparentStream=next==='transparent_stream';
+  _publishSettingsAppearance({settingsChatActivityDisplayMode:next});
   if(typeof _syncTransparentEventTimestampsControl==='function') _syncTransparentEventTimestampsControl(window._transparentEventTimestamps,next);
   if(next==='hide_all_activity'&&typeof window._hideLiveActivityForFinalAnswerOnly==='function') window._hideLiveActivityForFinalAnswerOnly();
 }
 
-function _syncTransparentEventTimestampsControl(enabled, mode){
+function _syncTransparentEventTimestampsControl(enabled){
   const next=enabled!==false;
-  const activeMode=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : (window._chatActivityDisplayMode||'compact_worklog');
-  const checkbox=$('settingsTransparentEventTimestamps');
-  if(checkbox){
-    checkbox.checked=next;
-    checkbox.disabled=activeMode!=='transparent_stream';
-    checkbox.style.opacity=activeMode==='transparent_stream'?'':'0.5';
-  }
   window._transparentEventTimestamps=next;
+  _publishSettingsAppearance({settingsTransparentEventTimestamps:next});
 }
 
 function _pickChatActivityDisplayMode(mode){
@@ -8551,21 +8505,9 @@ function _pickTransparentEventTimestamps(enabled){
 if(typeof window!=='undefined') window._pickTransparentEventTimestamps=_pickTransparentEventTimestamps;
 
 function _setAppearanceAutosaveStatus(state){
-  const el=$('settingsAppearanceAutosaveStatus');
-  if(!el) return;
-  el.className='settings-autosave-status';
-  if(!state){
-    el.textContent='';
-    return;
-  }
-  el.classList.add('is-'+state);
-  if(state==='saving'){
-    el.textContent=t('settings_autosave_saving');
-  }else if(state==='saved'){
-    el.textContent=t('settings_autosave_saved');
-  }else if(state==='failed'){
-    el.innerHTML=`<span>${esc(t('settings_autosave_failed'))}</span> <button type="button" onclick="_retryAppearanceAutosave()">${esc(t('settings_autosave_retry'))}</button>`;
-  }
+  if(!window.settingsHost) return;
+  const message=state==='saving'?t('settings_autosave_saving'):state==='saved'?t('settings_autosave_saved'):state==='failed'?t('settings_autosave_failed'):'';
+  window.settingsHost.setAutosaveStatus('appearance',state||'',message||'');
 }
 
 function _rememberAppearanceSaved(payload){
@@ -8576,40 +8518,25 @@ function _rememberAppearanceSaved(payload){
 }
 
 function _scheduleAppearanceAutosave(){
+  if(!window.settingsHost.getSnapshot().loaded) return;
   const payload=_appearancePayloadFromUi();
-  // Keep discard/close behavior aligned with the new mental model: appearance
-  // changes are committed immediately instead of treated as preview-only edits.
   _rememberAppearanceSaved(payload);
   _settingsAppearanceAutosaveRetryPayload=payload;
   _setAppearanceAutosaveStatus('saving');
-  if(_settingsAppearanceAutosaveTimer) clearTimeout(_settingsAppearanceAutosaveTimer);
-  _settingsAppearanceAutosaveTimer=setTimeout(()=>_autosaveAppearanceSettings(payload),350);
+  clearTimeout(_settingsAppearanceAutosaveTimer);
+  const generation=_profileSwitchGeneration;
+  _settingsAppearanceAutosaveTimer=setTimeout(()=>{if(generation===_profileSwitchGeneration) _autosaveAppearanceSettings(payload,generation);},350);
 }
 
-async function _autosaveAppearanceSettings(payload){
+async function _autosaveAppearanceSettings(payload,generation=_profileSwitchGeneration){
+  if(generation!==_profileSwitchGeneration) return;
   try{
-    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload),settingsGeneration:generation});
     _settingsAppearanceAutosaveRetryPayload=null;
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
       localStorage.setItem('hermes-font-size',saved.font_size);
     }
-    if(saved){
-      window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
-      if(Object.prototype.hasOwnProperty.call(saved,'chat_activity_display_mode')){
-        const beforeMode=window._chatActivityDisplayMode;
-        const beforeTimestamps=window._transparentEventTimestamps!==false;
-        _syncChatActivityDisplayModeControl(saved.chat_activity_display_mode);
-        _syncTransparentEventTimestampsControl(saved.transparent_stream_event_timestamps, saved.chat_activity_display_mode);
-        if(window._chatActivityDisplayMode!==beforeMode||((window._transparentEventTimestamps!==false)!==beforeTimestamps)){
-          if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-          if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
-        }
-      }
-      if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-    }
-    window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
-    window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
     // #6819: persist ONLY from an explicit boolean in the server response.
     // A failed autosave (`saved` falsy) or a partial response without the key
     // would otherwise write the synthesized default (ON) into the mirror,
@@ -8624,11 +8551,10 @@ async function _autosaveAppearanceSettings(payload){
       // Re-sync from the server-validated/clamped values so the UI and runtime
       // globals match exactly what was persisted.
       _applyStructuredCodeViewSettings(saved.structured_code_default_view,saved.structured_code_auto_tree_lines,false);
-      const modeSel=$('settingsStructuredCodeMode');
-      if(modeSel) modeSel.value=window._structuredCodeDefaultView;
-      const linesField=$('settingsStructuredCodeAutoLines');
-      if(linesField) linesField.value=window._structuredCodeAutoTreeLines;
-      _syncStructuredCodeLinesEnabled();
+      _publishSettingsAppearance({
+        settingsStructuredCodeMode:window._structuredCodeDefaultView,
+        settingsStructuredCodeAutoLines:window._structuredCodeAutoTreeLines,
+      });
     }
     if(saved&&payload&&Object.prototype.hasOwnProperty.call(payload,'worklog_details_expanded_default')&&(
       Object.prototype.hasOwnProperty.call(saved,'worklog_details_expanded_default') ||
@@ -8652,6 +8578,7 @@ async function _autosaveAppearanceSettings(payload){
     }
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
+    if(generation!==_profileSwitchGeneration) return;
     console.warn('[settings] appearance autosave failed', e);
     _setAppearanceAutosaveStatus('failed');
   }
@@ -8709,109 +8636,59 @@ function _setOwnedSpeechPayload(payload,settingKey,value){
 }
 
 function _preferencesPayloadFromUi(){
-  const payload={};
-  const sendKeySel=$('settingsSendKey');
-  if(sendKeySel) payload.send_key=sendKeySel.value;
-  const langSel=$('settingsLanguage');
-  if(langSel) payload.language=langSel.value;
-  const showUsageCb=$('settingsShowTokenUsage');
-  if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
-  const showQuotaChipCb=$('settingsShowQuotaChip');
-  if(showQuotaChipCb) payload.show_quota_chip=showQuotaChipCb.checked;
-  const showConversationOutlineCb=$('settingsShowConversationOutline');
-  if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
-  const hideSuggestionsCb=$('settingsHideSuggestions');
-  if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
-  const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
-  if(hideEmptyStatePanelCb) payload.hide_empty_state_panel=hideEmptyStatePanelCb.checked;
-  const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
-  if(virtualizeTranscriptCb){
-    payload.virtualize_transcript=virtualizeTranscriptCb.checked;
-    // #4343: persist the opt-in marker alongside. Enabling the experimental
-    // feature records an explicit post-flip opt-in so load_settings honors it
-    // (a stored true WITHOUT this marker is treated as a stale pre-flip value
-    // and reset to off). Unchecking clears the marker.
-    payload.virtualize_transcript_optin=virtualizeTranscriptCb.checked;
-  }
-  const showTpsCb=$('settingsShowTps');
-  if(showTpsCb) payload.show_tps=showTpsCb.checked;
-  const fadeTextCb=$('settingsFadeTextEffect');
-  if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
-  const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
-  if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
-  const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
-  if(workspaceTodosTabCb) payload.workspace_todos_tab=workspaceTodosTabCb.checked;
-  const apiRedactCb=$('settingsApiRedact');
-  if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
-  const showCliCb=$('settingsShowCliSessions');
-  if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
-  const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
-  if(showClaudeCodeCb) payload.show_claude_code_sessions=showClaudeCodeCb.checked;
-  const showCronCb=$('settingsShowCronSessions');
-  // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
-  // identically to the explicit saveSettings() path, so neither save route can
-  // persist show_cron_sessions=true while show_cli_sessions=false. (#3514)
-  if(showCronCb) payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked);
-  const showWebhookCb=$('settingsShowWebhookSessions');
-  if(showWebhookCb) payload.show_webhook_sessions=!!(showCliCb&&showCliCb.checked&&showWebhookCb.checked);
-  const showKanbanCb=$('settingsShowKanbanSessions');
-  if(showKanbanCb) payload.show_kanban_sessions=!!(showCliCb&&showCliCb.checked&&showKanbanCb.checked);
-  const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
-  if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
-  const syncCb=$('settingsSyncInsights');
-  if(syncCb) payload.sync_to_insights=syncCb.checked;
-  const updateCb=$('settingsCheckUpdates');
-  if(updateCb) payload.check_for_updates=updateCb.checked;
-  // update_channel is NOT included here — it has its own dedicated write path
-  // (_saveUpdateChannelFromSelector) so a stale tab's generic autosave cannot
-  // overwrite a newer channel selection made in another tab. (#6612)
-  const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
-  if(ignoreAgentUpdatesCb) payload.ignore_agent_updates=ignoreAgentUpdatesCb.checked;
-  const whatsNewSummaryCb=$('settingsWhatsNewSummary');
-  if(whatsNewSummaryCb) payload.whats_new_summary_enabled=whatsNewSummaryCb.checked;
-  const soundCb=$('settingsSoundEnabled');
-  if(soundCb) payload.sound_enabled=soundCb.checked;
-  const rtlCb=$('settingsRtl');
-  if(rtlCb) payload.rtl=rtlCb.checked;
-  const notifCb=$('settingsNotificationsEnabled');
-  if(notifCb) payload.notifications_enabled=notifCb.checked;
-  const sidebarDensitySel=$('settingsSidebarDensity');
-  if(sidebarDensitySel) payload.sidebar_density=sidebarDensitySel.value;
-  const pinnedLimitField=$('settingsPinnedSessionsLimit');
-  if(pinnedLimitField) payload.pinned_sessions_limit=parseInt(pinnedLimitField.value,10);
-  const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
-  if(autoTitleRefreshSel) payload.auto_title_refresh_every=parseInt(autoTitleRefreshSel.value,10);
-  const defaultMessageModeSel=$('settingsDefaultMessageMode');
-  if(defaultMessageModeSel) payload.default_message_mode=defaultMessageModeSel.value;
-  const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
-  if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
-  const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
-  if(newChatOnWorkspaceSwitchCb) payload.new_chat_on_workspace_switch=newChatOnWorkspaceSwitchCb.checked;
-  const botNameField=$('settingsBotName');
-  if(botNameField) payload.bot_name=botNameField.value;
+  const cli=_settingsChecked('preferences','settingsShowCliSessions');
+  const virtualize=_settingsChecked('preferences','settingsVirtualizeTranscript');
+  const payload={
+    send_key:_settingsValue('preferences','settingsSendKey'),
+    language:_settingsValue('preferences','settingsLanguage'),
+    show_token_usage:_settingsChecked('preferences','settingsShowTokenUsage'),
+    show_quota_chip:_settingsChecked('preferences','settingsShowQuotaChip'),
+    show_conversation_outline:_settingsChecked('preferences','settingsShowConversationOutline'),
+    hide_empty_state_suggestions:_settingsChecked('preferences','settingsHideSuggestions'),
+    hide_empty_state_panel:_settingsChecked('preferences','settingsHideEmptyStatePanel'),
+    virtualize_transcript:virtualize,
+    virtualize_transcript_optin:virtualize,
+    show_tps:_settingsChecked('preferences','settingsShowTps'),
+    fade_text_effect:_settingsChecked('preferences','settingsFadeTextEffect'),
+    terminal_auto_expand_on_output:_settingsChecked('preferences','settingsTerminalAutoExpand'),
+    workspace_todos_tab:_settingsChecked('appearance','settingsWorkspaceTodosTab'),
+    api_redact_enabled:_settingsChecked('preferences','settingsApiRedact'),
+    show_cli_sessions:cli,
+    show_claude_code_sessions:_settingsChecked('preferences','settingsShowClaudeCodeSessions'),
+    show_cron_sessions:cli&&_settingsChecked('preferences','settingsShowCronSessions'),
+    show_webhook_sessions:cli&&_settingsChecked('preferences','settingsShowWebhookSessions'),
+    show_kanban_sessions:cli&&_settingsChecked('preferences','settingsShowKanbanSessions'),
+    show_previous_messaging_sessions:_settingsChecked('preferences','settingsShowPreviousMessagingSessions'),
+    sync_to_insights:_settingsChecked('preferences','settingsSyncInsights'),
+    check_for_updates:_settingsChecked('preferences','settingsCheckUpdates'),
+    ignore_agent_updates:_settingsChecked('preferences','settingsIgnoreAgentUpdates'),
+    whats_new_summary_enabled:_settingsChecked('preferences','settingsWhatsNewSummary'),
+    sound_enabled:_settingsChecked('preferences','settingsSoundEnabled'),
+    rtl:_settingsChecked('preferences','settingsRtl'),
+    notifications_enabled:_settingsChecked('preferences','settingsNotificationsEnabled'),
+    sidebar_density:_settingsValue('preferences','settingsSidebarDensity'),
+    pinned_sessions_limit:parseInt(_settingsValue('preferences','settingsPinnedSessionsLimit'),10),
+    auto_title_refresh_every:parseInt(_settingsValue('preferences','settingsAutoTitleRefresh'),10),
+    default_message_mode:_settingsValue('preferences','settingsDefaultMessageMode'),
+    show_busy_placeholder_hint:_settingsChecked('preferences','settingsShowBusyPlaceholderHint'),
+    new_chat_on_workspace_switch:_settingsChecked('preferences','settingsNewChatOnWorkspaceSwitch'),
+    bot_name:_settingsValue('preferences','settingsBotName'),
+  };
   Object.assign(payload,_speechPreferencesPayloadFromUi());
   return payload;
 }
 
 function _speechPreferencesPayloadFromUi(){
   const payload={};
-  const ttsEnabledCb=$('settingsTtsEnabled');
-  if(ttsEnabledCb) _setOwnedSpeechPayload(payload,'tts_enabled',ttsEnabledCb.checked);
-  const ttsAutoReadCb=$('settingsTtsAutoRead');
-  if(ttsAutoReadCb) _setOwnedSpeechPayload(payload,'tts_auto_read',ttsAutoReadCb.checked);
-  const ttsEngineSel=$('settingsTtsEngine');
-  if(ttsEngineSel) _setOwnedSpeechPayload(payload,'tts_engine',ttsEngineSel.value||'browser');
-  const ttsVoiceSel=$('settingsTtsVoice');
-  if(ttsVoiceSel) _setOwnedSpeechPayload(payload,'tts_voice',ttsVoiceSel.value||'');
-  const ttsRateSlider=$('settingsTtsRate');
-  if(ttsRateSlider) _setOwnedSpeechPayload(payload,'tts_rate',parseFloat(ttsRateSlider.value));
-  const ttsPitchSlider=$('settingsTtsPitch');
-  if(ttsPitchSlider) _setOwnedSpeechPayload(payload,'tts_pitch',parseFloat(ttsPitchSlider.value));
-  const voiceModeCb=$('settingsVoiceModeEnabled');
-  if(voiceModeCb) _setOwnedSpeechPayload(payload,'voice_mode_button',voiceModeCb.checked);
-  const rawAudioCb=$('settingsRawAudio');
-  _setOwnedSpeechPayload(payload,'raw_audio_mode',rawAudioCb?rawAudioCb.checked:localStorage.getItem('hermes-raw-audio-mode')==='true');
-  _setOwnedSpeechPayload(payload,'voice_continuous',localStorage.getItem('hermes-voice-continuous')==='true');
+  _setOwnedSpeechPayload(payload,'tts_enabled',_settingsChecked('preferences','settingsTtsEnabled'));
+  _setOwnedSpeechPayload(payload,'tts_auto_read',_settingsChecked('preferences','settingsTtsAutoRead'));
+  _setOwnedSpeechPayload(payload,'tts_engine',_settingsValue('preferences','settingsTtsEngine')||'browser');
+  _setOwnedSpeechPayload(payload,'tts_voice',_settingsValue('preferences','settingsTtsVoice')||'');
+  _setOwnedSpeechPayload(payload,'tts_rate',parseFloat(_settingsValue('preferences','settingsTtsRate')));
+  _setOwnedSpeechPayload(payload,'tts_pitch',parseFloat(_settingsValue('preferences','settingsTtsPitch')));
+  _setOwnedSpeechPayload(payload,'voice_mode_button',_settingsChecked('preferences','settingsVoiceModeEnabled'));
+  _setOwnedSpeechPayload(payload,'raw_audio_mode',_settingsChecked('preferences','settingsRawAudio'));
+  _setOwnedSpeechPayload(payload,'voice_continuous',_settingsChecked('preferences','settingsDictationAppend'));
   const voiceSilence=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
   _setOwnedSpeechPayload(payload,'voice_silence_ms',(Number.isFinite(voiceSilence)&&voiceSilence>=200)?voiceSilence:1800);
   return payload;
@@ -8819,15 +8696,15 @@ function _speechPreferencesPayloadFromUi(){
 
 // Keep same-page settings merges FIFO so one response cannot race the next read-modify-write.
 let _settingsPanelPostQueue=Promise.resolve();
-
 function _enqueueSettingsPost(options){
   const requestOptions={...(options||{})};
+  const settingsGeneration=requestOptions.settingsGeneration;
+  delete requestOptions.settingsGeneration;
   if(typeof requestOptions.body==='string') requestOptions.body=String(requestOptions.body);
   const run=_settingsPanelPostQueue.then(async()=>{
+    if(settingsGeneration!==undefined&&settingsGeneration!==_profileSwitchGeneration) throw new Error('Settings profile changed before save');
     const saved=await api('/api/settings',requestOptions);
-    if(!saved||typeof saved!=='object'||Array.isArray(saved)){
-      throw new Error('Invalid settings response');
-    }
+    if(!saved||typeof saved!=='object'||Array.isArray(saved)) throw new Error('Invalid settings response');
     return saved;
   });
   _settingsPanelPostQueue=run.catch(()=>{});
@@ -8842,30 +8719,12 @@ let _preferencesAutosaveStatusOwner=null;
 
 function _setPreferencesAutosaveStatus(state,owner){
   owner=owner||'preferences';
-  const el=$('settingsPreferencesAutosaveStatus');
-  if(!el) return;
-  // Guard: if the slot shows 'failed' from a different writer, do not overwrite.
-  // The DOM class is the source of truth; an external clear would remove
-  // 'is-failed' and unblock writes without needing an extra variable.
-  if(_preferencesAutosaveStatusOwner&&
-     _preferencesAutosaveStatusOwner!==owner&&
-     el.classList.contains('is-failed')){
-    return;
-  }
+  if(!window.settingsHost) return;
+  const current=window.settingsHost.getSnapshot().status.preferences.state;
+  if(_preferencesAutosaveStatusOwner&&_preferencesAutosaveStatusOwner!==owner&&current==='failed') return;
   _preferencesAutosaveStatusOwner=state?owner:null;
-  el.className='settings-autosave-status';
-  if(!state){
-    el.textContent='';
-    return;
-  }
-  el.classList.add('is-'+state);
-  if(state==='saving'){
-    el.textContent=t('settings_autosave_saving');
-  }else if(state==='saved'){
-    el.textContent=t('settings_autosave_saved');
-  }else if(state==='failed'){
-    el.innerHTML=`<span>${esc(t('settings_autosave_failed'))}</span> <button type=\"button\" onclick=\"_retryPreferencesAutosave()\">${esc(t('settings_autosave_retry'))}</button>`;
-  }
+  const message=state==='saving'?t('settings_autosave_saving'):state==='saved'?t('settings_autosave_saved'):state==='failed'?t('settings_autosave_failed'):'';
+  window.settingsHost.setAutosaveStatus('preferences',state||'',message||'');
 }
 
 function _rememberPreferencesSaved(payload){
@@ -8882,19 +8741,21 @@ function _applyWorkspaceTodosTabVisibility(){
     if(typeof switchWorkspacePanelTab==='function') switchWorkspacePanelTab('files');
   }
 }
-
 function _schedulePreferencesAutosave(){
+  if(!window.settingsHost.getSnapshot().loaded) return;
   const payload=_preferencesPayloadFromUi();
   _rememberPreferencesSaved(payload);
   _settingsPreferencesAutosaveRetryPayload=payload;
   _setPreferencesAutosaveStatus('saving');
-  if(_settingsPreferencesAutosaveTimer) clearTimeout(_settingsPreferencesAutosaveTimer);
-  _settingsPreferencesAutosaveTimer=setTimeout(()=>_autosavePreferencesSettings(payload),350);
+  clearTimeout(_settingsPreferencesAutosaveTimer);
+  const generation=_profileSwitchGeneration;
+  _settingsPreferencesAutosaveTimer=setTimeout(()=>{if(generation===_profileSwitchGeneration) _autosavePreferencesSettings(payload,generation);},350);
 }
 
-async function _autosavePreferencesSettings(payload){
+async function _autosavePreferencesSettings(payload,generation=_profileSwitchGeneration){
+  if(generation!==_profileSwitchGeneration) return;
   try{
-    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload),settingsGeneration:generation});
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -8947,22 +8808,12 @@ async function _autosavePreferencesSettings(payload){
     // review of v0.50.250, SHOULD-FIX Q1.)
     const pwField=$('settingsPassword');
     const pwDirty=!!(pwField&&pwField.value);
-    const modelSel=$('settingsModel');
-    const modelState=(typeof _captureModelDropdownSelection==='function'&&modelSel)
-      ? (_captureModelDropdownSelection(modelSel)||{model:String((modelSel&&modelSel.value)||''),model_provider:null})
-      : {model:String((modelSel&&modelSel.value)||''),model_provider:null};
-    const modelDirty=!!(
-      modelSel&&(
-        (modelState.model||'')!==(_settingsHermesDefaultModelOnOpen||'')||
-        ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null))
-      )
-    );
+    const settingsState=window.settingsHost.getSnapshot();
+    const model=String(settingsState.preferences.settingsModel||'');
+    const provider=String(settingsState.preferences.settingsModelProvider||'')||null;
+    const modelDirty=model!==(_settingsHermesDefaultModelOnOpen||'')||provider!==(_settingsHermesDefaultModelProviderOnOpen||null);
     if(!pwDirty&&!modelDirty){
-      const maxTokensField=$('settingsMaxTokens');
-      const maxTokensDirty=!!(
-        maxTokensField&&
-        String(maxTokensField.value||'')!==String(maxTokensField.dataset.initialValue||'')
-      );
+      const maxTokensDirty=String(settingsState.preferences.settingsMaxTokens||'')!==String(settingsState.baselines.maxTokens||'');
       if(!maxTokensDirty){
         _settingsDirty=false;
         const bar=$('settingsUnsavedBar');
@@ -8970,6 +8821,7 @@ async function _autosavePreferencesSettings(payload){
       }
     }
   }catch(e){
+    if(generation!==_profileSwitchGeneration) return;
     console.warn('[settings] preferences autosave failed', e);
     _setPreferencesAutosaveStatus('failed');
   }
@@ -8989,65 +8841,167 @@ let _channelSaveSeq=0;
 // channelSel.value inside the handler IS the new value, not the old one.
 let _confirmedUpdateChannel=null;
 
-async function _saveUpdateChannelFromSelector(channelSel){
-  // #6612: dedicated write path for update_channel so the generic preferences
-  // autosave payload never carries this field. A stale tab toggling an unrelated
-  // preference must not overwrite a newer channel selection from another tab.
-  if(!channelSel) return;
-  const val=channelSel.value==='experimental'?'experimental':'stable';
+async function _saveUpdateChannel(value){
+  const val=value==='experimental'?'experimental':'stable';
   const seq=++_channelSaveSeq;
-  if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saving','channel');
+  const generation=_profileSwitchGeneration;
+  const previous=_confirmedUpdateChannel||window.settingsHost.getSnapshot().preferences.settingsUpdateChannel||'stable';
+  _setPreferencesAutosaveStatus('saving','channel');
   try{
-    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify({update_channel:val})});
-    const confirmed=(saved&&(saved.update_channel==='experimental'||saved.update_channel==='stable'))
-      ?saved.update_channel:val;
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify({update_channel:val}),settingsGeneration:generation});
+    if(generation!==_profileSwitchGeneration) return;
+    const confirmed=(saved&&(saved.update_channel==='experimental'||saved.update_channel==='stable'))?saved.update_channel:val;
     _confirmedUpdateChannel=confirmed;
-    // The queue makes the server state FIFO; the sequence guard protects only
-    // the selector and other response-driven UI from stale completions.
     if(seq!==_channelSaveSeq) return;
-    channelSel.value=confirmed;
-    if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saved','channel');
-    // Run the update check and badge sync against the confirmed server value,
-    // not the optimistic pre-save value.
-    if(typeof checkUpdatesNow==='function'){
-      try{checkUpdatesNow(confirmed);}catch(_){}
-    }
+    const current=window.settingsHost.getSnapshot();
+    window.settingsHost.setSnapshot({...current,preferences:{...current.preferences,settingsUpdateChannel:confirmed}});
+    _setPreferencesAutosaveStatus('saved','channel');
+    if(typeof checkUpdatesNow==='function'){try{checkUpdatesNow(confirmed);}catch(_){}}
     if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(confirmed);
-  }catch(e){
-    console.warn('[settings] update_channel save failed',e);
-    // Revert selector and badge to the last server-confirmed value so both
-    // controls agree with what the server actually holds. Status clear and
-    // revert are both inside the seq guard so a superseded in-flight failure
-    // does not clear status that a newer write or the generic autosave owns.
+  }catch(error){
+    if(generation!==_profileSwitchGeneration) return;
+    console.warn('[settings] update_channel save failed',error);
     if(seq===_channelSaveSeq){
-      const revertTo=_confirmedUpdateChannel||'stable';
-      channelSel.value=revertTo;
-      if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(revertTo);
-      // Do not call _setPreferencesAutosaveStatus('failed','channel'): its retry
-      // button replays _retryPreferencesAutosave(), which cannot contain
-      // update_channel (#6612). Clear the saving indicator instead; the selector
-      // snap-back is the user's signal.
-      if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus(null,'channel');
+      const current=window.settingsHost.getSnapshot();
+      window.settingsHost.setSnapshot({...current,preferences:{...current.preferences,settingsUpdateChannel:previous}});
+      if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(previous);
+      _setPreferencesAutosaveStatus(null,'channel');
     }
   }
 }
 
-function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
-  if(!field) return;
-  const parsedFallback=parseInt(fallbackValue,10);
-  if(Number.isFinite(parsedFallback)&&parsedFallback>0&&typeof t==='function'){
-    field.placeholder=t('settings_placeholder_max_tokens_fallback', parsedFallback);
-    return;
+
+
+let _settingsReactEditSeq=0;
+const _settingsReactEdits=new Map();
+let _settingsReactOptionEdit=null;
+let _settingsReactAuxEdit=null;
+function _recordSettingsReactEdit(pane,id,value){
+  _settingsReactEdits.set(pane+':'+id,{pane,id,value,seq:++_settingsReactEditSeq,generation:_profileSwitchGeneration});
+}
+const _settingsSnapshotServerFields={
+  appearance:{
+    theme:['theme','dark'],skin:['skin','default'],font_size:['font_size','default'],
+    settingsWorkspaceTodosTab:['workspace_todos_tab',false],settingsSessionJumpButtons:['session_jump_buttons',false],
+    settingsSessionEndlessScroll:['session_endless_scroll',false],settingsAutoScrollFollow:['auto_scroll_follow',true],
+    settingsChatActivityDisplayMode:['chat_activity_display_mode','compact_worklog'],
+    settingsTransparentEventTimestamps:['transparent_stream_event_timestamps',true],
+    settingsRenderUserMarkdown:['render_user_markdown',false],settingsLargeTextPasteAsAttachment:['large_text_paste_as_attachment',true],
+    settingsProjectQuickCreate:['project_quick_create_buttons',false],settingsStructuredCodeMode:['structured_code_default_view','auto'],
+    settingsStructuredCodeAutoLines:['structured_code_auto_tree_lines',10],settingsShowTitlebarProfile:['show_titlebar_profile',false],
+    settingsWorklogDetailsExpandedDefault:['worklog_details_expanded_default',false],
+  },
+  preferences:{
+    settingsSendKey:['send_key','enter'],settingsLanguage:['language','en'],
+    settingsShowTokenUsage:['show_token_usage',false],settingsShowQuotaChip:['show_quota_chip',false],
+    settingsShowConversationOutline:['show_conversation_outline',false],settingsHideSuggestions:['hide_empty_state_suggestions',false],
+    settingsHideEmptyStatePanel:['hide_empty_state_panel',false],settingsVirtualizeTranscript:['virtualize_transcript',false],
+    settingsShowTps:['show_tps',false],settingsFadeTextEffect:['fade_text_effect',false],
+    settingsTerminalAutoExpand:['terminal_auto_expand_on_output',false],settingsApiRedact:['api_redact_enabled',true],
+    settingsShowCliSessions:['show_cli_sessions',true],settingsShowClaudeCodeSessions:['show_claude_code_sessions',false],
+    settingsShowCronSessions:['show_cron_sessions',false],settingsShowWebhookSessions:['show_webhook_sessions',false],
+    settingsShowKanbanSessions:['show_kanban_sessions',false],settingsShowPreviousMessagingSessions:['show_previous_messaging_sessions',false],
+    settingsSyncInsights:['sync_to_insights',false],settingsCheckUpdates:['check_for_updates',true],
+    settingsIgnoreAgentUpdates:['ignore_agent_updates',false],settingsWhatsNewSummary:['whats_new_summary_enabled',false],
+    settingsSoundEnabled:['sound_enabled',false],settingsRtl:['rtl',false],settingsNotificationsEnabled:['notifications_enabled',false],
+    settingsSidebarDensity:['sidebar_density','compact'],settingsPinnedSessionsLimit:['pinned_sessions_limit',3],
+    settingsAutoTitleRefresh:['auto_title_refresh_every',0],settingsDefaultMessageMode:['default_message_mode','steer'],
+    settingsShowBusyPlaceholderHint:['show_busy_placeholder_hint',false],settingsNewChatOnWorkspaceSwitch:['new_chat_on_workspace_switch',false],
+    settingsBotName:['bot_name','Hermes'],settingsTtsEnabled:['tts_enabled',false],settingsTtsAutoRead:['tts_auto_read',false],
+    settingsTtsEngine:['tts_engine','browser'],settingsTtsVoice:['tts_voice',''],settingsTtsRate:['tts_rate',1],
+    settingsTtsPitch:['tts_pitch',1],settingsVoiceModeEnabled:['voice_mode_button',false],settingsRawAudio:['raw_audio_mode',false],
+    settingsDictationAppend:['voice_continuous',false],settingsUpdateChannel:['update_channel','stable'],
+    settingsMaxTokens:['max_tokens',''],settingsModel:['default_model',''],settingsModelProvider:['default_model_provider',''],
+    settingsPassword:['',''],settingsCurrentPassword:['',''],
+  },
+};
+function _settingsSnapshotFromServer(settings,previous){
+  settings=settings&&typeof settings==='object'?settings:{};
+  previous=previous||window.settingsHost.getSnapshot();
+  const appearance={},preferences={};
+  for(const [id,[key,fallback]] of Object.entries(_settingsSnapshotServerFields.appearance)) appearance[id]=settings[key]??fallback;
+  for(const [id,[key,fallback]] of Object.entries(_settingsSnapshotServerFields.preferences)) preferences[id]=key?settings[key]??fallback:fallback;
+  const worklog=settings.worklog_details_expanded_default??settings.activity_feed_expanded_default??false;
+  appearance.settingsWorklogDetailsExpandedDefault=!!worklog;
+  appearance.settingsWorkspacePanelOpen=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open';
+  appearance.settingsTheme=settings.theme||'dark';
+  appearance.settingsSkin=(localStorage.getItem('hermes-skin')||settings.skin||'default').toLowerCase();
+  appearance.settingsFontSize=settings.font_size||localStorage.getItem('hermes-font-size')||'default';
+  const max=parseInt(settings.max_tokens,10);
+  preferences.settingsMaxTokens=Number.isFinite(max)&&max>0?String(max):'';
+  preferences.settingsModel=settings.default_model??previous.baselines.model??'';
+  preferences.settingsModelProvider=settings.default_model_provider??previous.baselines.modelProvider??'';
+  preferences.settingsLanguage=(typeof resolvePreferredLocale==='function')
+    ?resolvePreferredLocale(settings.language,localStorage.getItem('hermes-lang'))
+    :(settings.language||localStorage.getItem('hermes-lang')||'en');
+  const speechKeys=Array.isArray(settings.persisted_speech_keys)?settings.persisted_speech_keys:previous.speechOwned;
+  const storage={tts_enabled:'hermes-tts-enabled',tts_auto_read:'hermes-tts-auto-read',tts_engine:'hermes-tts-engine',tts_voice:'hermes-tts-voice',tts_rate:'hermes-tts-rate',tts_pitch:'hermes-tts-pitch',voice_mode_button:'hermes-voice-mode-button',raw_audio_mode:'hermes-raw-audio-mode',voice_continuous:'hermes-voice-continuous'};
+  for(const [key,storageKey] of Object.entries(storage)){
+    const id=Object.keys(_settingsSnapshotServerFields.preferences).find(name=>_settingsSnapshotServerFields.preferences[name][0]===key);
+    const stored=localStorage.getItem(storageKey);
+    if(!speechKeys.includes(key)&&stored!==null) preferences[id]=key.endsWith('enabled')||['tts_auto_read','voice_mode_button','raw_audio_mode','voice_continuous'].includes(key)?stored==='true':key==='tts_rate'||key==='tts_pitch'?Number(stored):stored;
   }
-  field.placeholder=(typeof t==='function')
-    ? t('settings_placeholder_max_tokens_none')
-    : 'No override';
+  preferences.settingsSendKey=settings.send_key||'enter';
+  const structuredMode=settings.structured_code_default_view;
+  appearance.settingsStructuredCodeMode=['auto','on','off'].includes(structuredMode)?structuredMode:'auto';
+  const structuredLines=parseInt(settings.structured_code_auto_tree_lines,10);
+  appearance.settingsStructuredCodeAutoLines=Number.isFinite(structuredLines)&&structuredLines>=1&&structuredLines<=1000?structuredLines:10;
+  const activityMode=settings.chat_activity_display_mode;
+  appearance.settingsChatActivityDisplayMode=activityMode==='transparent_stream'||activityMode==='hide_all_activity'?activityMode:'compact_worklog';
+  preferences.settingsSidebarDensity=settings.sidebar_density==='detailed'?'detailed':'compact';
+  const titleRefresh=String(settings.auto_title_refresh_every??'0');
+  preferences.settingsAutoTitleRefresh=['0','5','10','20'].includes(titleRefresh)?titleRefresh:'0';
+  const botName=settings.bot_name||'Hermes';
+  preferences.settingsBotName=botName;
+  const messageMode=settings.default_message_mode||settings.busy_input_mode||'steer';
+  const fallback=parseInt(settings.max_tokens_fallback,10);
+  preferences.settingsRtl=!!settings.rtl||localStorage.getItem('hermes-rtl')==='true';
+  return {...previous,appearance,preferences,speechOwned:[...new Set(speechKeys)],baselines:{...previous.baselines,model:settings.default_model??previous.baselines.model??'',modelProvider:settings.default_model_provider??previous.baselines.modelProvider??null,maxTokens:preferences.settingsMaxTokens,maxTokensFallback:Number.isFinite(fallback)&&fallback>0?String(fallback):''}};
+}
+async function _loadLegacySettingsWithoutReact(settings){
+  const password=$('settingsPassword');
+  if(password){password.value='';password.disabled=!!settings.password_env_var;}
+  _settingsPasswordEnvLocked=!!settings.password_env_var;
+  const lock=$('settingsPasswordEnvLock');
+  if(lock) lock.style.display=_settingsPasswordEnvLocked?'block':'none';
+  try{
+    const auth=await api('/api/auth/status');
+    _settingsPasswordAuthEnabled=!!auth.password_auth_enabled;
+    _setSettingsAuthButtonsVisible(!!auth.auth_enabled);
+    _syncPasswordlessButton(auth);
+    _renderSettingsAuthStatus(auth);
+    _updateCurrentPasswordVisibility();
+    _updateAuthWarningBadge(auth);
+    _updateAuthDisabledWarning(auth);
+  }catch(_){}
+  loadPasskeys();
+  if(_settingsPasswordEnvLocked){const button=$('btnDisableAuth');if(button) button.style.display='none';}
+  _syncHermesPanelSessionActions();
+  if(typeof loadDashboardSettings==='function') loadDashboardSettings();
+  loadProvidersPanel();loadPluginsPanel();loadExtensionsPanel();
+  switchSettingsSection(_settingsSection);
 }
 
+
+let _settingsPanelLoadSeq=0;
 async function loadSettingsPanel(){
+  const loadSeq=++_settingsPanelLoadSeq;
+  clearTimeout(_settingsAppearanceAutosaveTimer);
+  clearTimeout(_settingsPreferencesAutosaveTimer);
+  _settingsAppearanceAutosaveTimer=null;
+  _settingsPreferencesAutosaveTimer=null;
+  const profileGeneration=typeof _profileSwitchGeneration==='number'?_profileSwitchGeneration:null;
+  const modelEditSeqAtStart=_settingsModelEditSeq;
+  const userEditSeqAtStart=_settingsReactEditSeq;
+  const isCurrent=()=>loadSeq===_settingsPanelLoadSeq
+    && (profileGeneration===null||profileGeneration===_profileSwitchGeneration);
   try{
+    if(!isCurrent()) return;
     const settings=await api('/api/settings');
-    checkWebUIVersionSkew(settings);
+    if(!window.settingsHost){await _loadLegacySettingsWithoutReact(settings);return;}
+    const hydrated=_settingsSnapshotFromServer(settings,window.settingsHost.getSnapshot());
+    window.settingsHost.setSnapshot({...hydrated,loaded:false,loadError:''});
+    _confirmedUpdateChannel=hydrated.preferences.settingsUpdateChannel;
     // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
     //
@@ -9071,171 +9025,25 @@ async function loadSettingsPanel(){
       const agentVersion = (settings.agent_version || 'not detected').toString().trim() || 'not detected';
       agentBadge.textContent = `Agent: ${agentVersion}`;
     }
-    // Hydrate appearance controls first so a slow /api/models request
-    // cannot overwrite an in-progress theme/skin selection.
-    const themeSel=$('settingsTheme');
-    const themeVal=settings.theme||'dark';
-    if(themeSel) themeSel.value=themeVal;
+    const themeVal=hydrated.appearance.settingsTheme;
+    const skinVal=hydrated.appearance.settingsSkin;
+    const fontSizeVal=hydrated.appearance.settingsFontSize;
     if(typeof _syncThemePicker==='function') _syncThemePicker(themeVal);
-    const skinVal=(localStorage.getItem('hermes-skin')||settings.skin||'default').toLowerCase();
-    const skinSel=$('settingsSkin');
-    if(skinSel) skinSel.value=skinVal;
     if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
-    const fontSizeVal=settings.font_size||localStorage.getItem('hermes-font-size')||'default';
     localStorage.setItem('hermes-font-size',fontSizeVal);
     if(typeof _applyFontSize==='function') _applyFontSize(fontSizeVal);
-    const fontSizeSel=$('settingsFontSize');
-    if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
-    const jumpButtonsCb=$('settingsSessionJumpButtons');
-    if(jumpButtonsCb){
-      jumpButtonsCb.checked=!!settings.session_jump_buttons;
-      window._sessionJumpButtonsEnabled=jumpButtonsCb.checked;
-      jumpButtonsCb.onchange=function(){
-        window._sessionJumpButtonsEnabled=this.checked;
-        if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-        _scheduleAppearanceAutosave();
-      };
-    }
+    window._sessionJumpButtonsEnabled=!!settings.session_jump_buttons;
+    window._sessionEndlessScrollEnabled=!!settings.session_endless_scroll;
+    window._autoScrollFollow=settings.auto_scroll_follow!==false;
+    if(typeof settings.auto_scroll_follow==='boolean'&&typeof _persistAutoScrollFollow==='function') _persistAutoScrollFollow(settings.auto_scroll_follow);
     if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-    // Workspace panel default-open toggle (localStorage-backed)
-    // Uses a separate key (hermes-webui-workspace-panel-pref) so that
-    // closing the panel via toolbar X does not clear the user's preference.
-    const wsPanelCb=$('settingsWorkspacePanelOpen');
-    if(wsPanelCb){
-      wsPanelCb.checked=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open';
-      wsPanelCb.onchange=function(){
-        const open=this.checked;
-        localStorage.setItem('hermes-webui-workspace-panel-pref',open?'open':'closed');
-        // Also sync the runtime key so the current session reflects the change
-        localStorage.setItem('hermes-webui-workspace-panel',open?'open':'closed');
-        document.documentElement.dataset.workspacePanel=open?'open':'closed';
-        if(open&&_workspacePanelMode==='closed') openWorkspacePanel('browse');
-        else if(!open&&_workspacePanelMode!=='closed') toggleWorkspacePanel(false);
-      };
-    }
-    const endlessScrollCb=$('settingsSessionEndlessScroll');
-    if(endlessScrollCb){
-      endlessScrollCb.checked=!!settings.session_endless_scroll;
-      window._sessionEndlessScrollEnabled=endlessScrollCb.checked;
-      endlessScrollCb.onchange=function(){
-        window._sessionEndlessScrollEnabled=this.checked;
-        _scheduleAppearanceAutosave();
-      };
-    }
-    const autoScrollFollowCb=$('settingsAutoScrollFollow');
-    if(autoScrollFollowCb){
-      autoScrollFollowCb.checked=settings.auto_scroll_follow!==false;
-      window._autoScrollFollow=autoScrollFollowCb.checked;
-      // #6819/#6856: a successful settings GET is an authoritative resolve, so
-      // sync the global mirror too — otherwise an explicit OFF applied here
-      // leaves a stale ON mirror that a later boot-fetch failure would restore.
-      // Persist ONLY when the server explicitly sent a boolean (never persist a
-      // synthesized default from an absent field — matches the boot contract).
-      if(typeof settings.auto_scroll_follow==='boolean'&&typeof _persistAutoScrollFollow==='function'){
-        _persistAutoScrollFollow(settings.auto_scroll_follow);
-      }
-      autoScrollFollowCb.onchange=function(){
-        window._autoScrollFollow=this.checked;
-        _scheduleAppearanceAutosave();
-      };
-    }
-    const worklogDetailsExpandedCb=$('settingsWorklogDetailsExpandedDefault');
-    const chatActivityModeSel=$('settingsChatActivityDisplayMode');
-    const transparentEventTimestampsCb=$('settingsTransparentEventTimestamps');
-    if(chatActivityModeSel){
-      _syncChatActivityDisplayModeControl(settings.chat_activity_display_mode);
-      _syncTransparentEventTimestampsControl(settings.transparent_stream_event_timestamps, settings.chat_activity_display_mode);
-      chatActivityModeSel.addEventListener('change',()=>{
-        _pickChatActivityDisplayMode(chatActivityModeSel.value);
-      },{once:false});
-    }
-    if(transparentEventTimestampsCb){
-      transparentEventTimestampsCb.addEventListener('change',()=>{
-        _pickTransparentEventTimestamps(transparentEventTimestampsCb.checked);
-      },{once:false});
-    }
-    if(worklogDetailsExpandedCb){
-      const worklogDetailsExpanded=Object.prototype.hasOwnProperty.call(settings,'worklog_details_expanded_default')
-        ? settings.worklog_details_expanded_default
-        : settings.activity_feed_expanded_default;
-      worklogDetailsExpandedCb.checked=!!worklogDetailsExpanded;
-      window._worklogDetailsExpandedByDefault=worklogDetailsExpandedCb.checked;
-      worklogDetailsExpandedCb.onchange=function(){
-        window._worklogDetailsExpandedByDefault=this.checked;
-        if(typeof _applyWorklogDetailsExpandedDefault==='function') _applyWorklogDetailsExpandedDefault();
-        _scheduleAppearanceAutosave();
-      };
-    }
-    const renderUserMarkdownCb=$('settingsRenderUserMarkdown');
-    if(renderUserMarkdownCb){
-      renderUserMarkdownCb.checked=!!settings.render_user_markdown;
-      window._renderUserMarkdown=renderUserMarkdownCb.checked;
-      renderUserMarkdownCb.onchange=function(){
-        window._renderUserMarkdown=this.checked;
-        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-        if(typeof renderMessages==='function') renderMessages();
-        _scheduleAppearanceAutosave();
-      };
-    }
-    const largeTextPasteCb=$('settingsLargeTextPasteAsAttachment');
-    if(largeTextPasteCb){
-      largeTextPasteCb.checked=settings.large_text_paste_as_attachment!==false;
-      window._largeTextPasteAsAttachment=largeTextPasteCb.checked;
-      largeTextPasteCb.onchange=function(){
-        window._largeTextPasteAsAttachment=this.checked;
-        _scheduleAppearanceAutosave();
-      };
-    }
-    const pqcCb=$('settingsProjectQuickCreate');
-    if(pqcCb){
-      pqcCb.checked=!!(settings.project_quick_create_buttons);
-      window._projectQuickCreate=pqcCb.checked;
-      pqcCb.onchange=function(){
-        window._projectQuickCreate=this.checked;
-        // Rebuild the sidebar so the per-project + buttons appear/disappear
-        // immediately, rather than only on the next render.
-        try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
-        _scheduleAppearanceAutosave();
-      };
-    }
-    const structuredCodeModeSel=$('settingsStructuredCodeMode');
-    const structuredCodeLinesField=$('settingsStructuredCodeAutoLines');
-    if(structuredCodeModeSel){
-      const mode=['auto','on','off'].includes(settings.structured_code_default_view)?settings.structured_code_default_view:'auto';
-      structuredCodeModeSel.value=mode;
-      const lines=parseInt(settings.structured_code_auto_tree_lines,10);
-      const safeLines=(Number.isFinite(lines)&&lines>=1&&lines<=1000)?lines:10;
-      if(structuredCodeLinesField) structuredCodeLinesField.value=safeLines;
-      _applyStructuredCodeViewSettings(mode,safeLines,false);
-      _syncStructuredCodeLinesEnabled();
-      structuredCodeModeSel.onchange=function(){
-        const cfg=_structuredCodeViewFromUi();
-        _applyStructuredCodeViewSettings(cfg.structured_code_default_view,cfg.structured_code_auto_tree_lines,true);
-        _syncStructuredCodeLinesEnabled();
-        _scheduleAppearanceAutosave();
-      };
-      if(structuredCodeLinesField){
-        // Commit on change (blur / Enter / spinner) rather than every keystroke,
-        // so a long transcript is not rebuilt per digit typed. Only re-render in
-        // auto mode, where the threshold actually affects the default view.
-        structuredCodeLinesField.addEventListener('change',function(){
-          const cfg=_structuredCodeViewFromUi();
-          structuredCodeLinesField.value=cfg.structured_code_auto_tree_lines;
-          _applyStructuredCodeViewSettings(cfg.structured_code_default_view,cfg.structured_code_auto_tree_lines,cfg.structured_code_default_view==='auto');
-          _scheduleAppearanceAutosave();
-        },{once:false});
-      }
-    }
-    const showTitlebarProfileCb=$('settingsShowTitlebarProfile');
-    if(showTitlebarProfileCb){
-      showTitlebarProfileCb.checked=!!settings.show_titlebar_profile;
-      showTitlebarProfileCb.onchange=function(){
-        window._showTitlebarProfile=this.checked;
-        if(typeof _applyTitlebarProfileVisibility==='function') _applyTitlebarProfileVisibility();
-        _scheduleAppearanceAutosave();
-      };
-    }
+    window._worklogDetailsExpandedByDefault=!!(settings.worklog_details_expanded_default??settings.activity_feed_expanded_default);
+    window._renderUserMarkdown=!!settings.render_user_markdown;
+    window._largeTextPasteAsAttachment=settings.large_text_paste_as_attachment!==false;
+    window._projectQuickCreate=!!settings.project_quick_create_buttons;
+    _applyStructuredCodeViewSettings(hydrated.appearance.settingsStructuredCodeMode,hydrated.appearance.settingsStructuredCodeAutoLines,false);
+    window._showTitlebarProfile=!!settings.show_titlebar_profile;
     _ensureComposerControlVisibilityState(settings);
     if(Array.isArray(settings.composer_control_order)){
       const composerOrder=_setComposerControlOrder(settings.composer_control_order);
@@ -9244,486 +9052,163 @@ async function loadSettingsPanel(){
     _renderComposerControlChips();
     _renderComposerSituationalControlChips();
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
-    // Tab visibility/order chips (dynamically populated from DOM)
-    var hiddenTabs=[];
-    if(Array.isArray(settings.hidden_tabs)){
-      // Server value takes priority — even an empty array means "no tabs hidden"
-      hiddenTabs=settings.hidden_tabs.filter(function(s){return typeof s==='string'&&s.trim();});
-    }else{
-      // Server has no hidden_tabs key — fall back to localStorage
-      hiddenTabs=_getHiddenTabs();
-    }
-    var tabOrder=[];
-    if(Array.isArray(settings.tab_order)){
-      tabOrder=settings.tab_order.filter(function(s){return typeof s==='string'&&s.trim();});
-    }else{
-      tabOrder=_getTabOrder();
-    }
-    _setTabOrder(tabOrder);
-    _applyTabOrder(tabOrder);
-    _setHiddenTabs(hiddenTabs);
-    _applyTabVisibility(hiddenTabs);
-    _renderTabVisibilityChips();
-    const resolvedLanguage=(typeof resolvePreferredLocale==='function')
-      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
-      : (settings.language || localStorage.getItem('hermes-lang') || 'en');
-    // Keep settings modal and current page strings in sync with the resolved locale.
-    if(typeof setLocale==='function'){
-      setLocale(resolvedLanguage);
-      if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
-    }
-    // Populate model dropdown from /api/models + live model fetch (#872)
-    const modelSel=$('settingsModel');
-    if(modelSel){
-      modelSel.innerHTML='';
-      let models=null;
-      try{
-        models=await api('/api/models');
-        for(const g of ((models||{}).groups||[])){
-          const og=document.createElement('optgroup');
-          og.label=g.provider;
-          if(g.provider_id) og.dataset.provider=g.provider_id;
-          for(const m of [...(g.models||[]),...(g.extra_models||[])]){
-            const opt=document.createElement('option');
-            opt.value=m.id;opt.textContent=m.label;
-            if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
-              opt.dataset.fast='1';
-            }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
-              opt.dataset.fast='0';
-            }
-            og.appendChild(opt);
-          }
-          modelSel.appendChild(og);
+    const hiddenTabs=Array.isArray(settings.hidden_tabs)?settings.hidden_tabs.filter(value=>typeof value==='string'&&value.trim()):_getHiddenTabs();
+    const tabOrder=Array.isArray(settings.tab_order)?settings.tab_order.filter(value=>typeof value==='string'&&value.trim()):_getTabOrder();
+    _setTabOrder(tabOrder);_applyTabOrder(tabOrder);_setHiddenTabs(hiddenTabs);_applyTabVisibility(hiddenTabs);_renderTabVisibilityChips();
+    const resolvedLanguage=hydrated.preferences.settingsLanguage;
+    if(typeof setLocale==='function'){setLocale(resolvedLanguage);if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();}
+    // Publish model options as data; React owns the select, chip, and searchable dropdown.
+    const modelEditSeq=modelEditSeqAtStart;
+    let models=null;
+    let catalogLoaded=false;
+    const modelOptions=window.settingsHost.getSnapshot().preferencesOptions.models.slice();
+    const modelSource=document.createElement('select');
+    try{
+      models=await api('/api/models');
+      catalogLoaded=true;
+      if(!isCurrent()) return;
+      for(const group of (models.groups||[])){
+        const optgroup=document.createElement('optgroup');
+        optgroup.label=group.provider||group.provider_id||'';
+        optgroup.dataset.provider=group.provider_id||group.provider||'';
+        for(const model of [...(group.models||[]),...(group.extra_models||[])]){
+          const option=document.createElement('option');
+          option.value=model.id;
+          option.textContent=model.label||model.id;
+          option.dataset.model=model.id;
+          option.dataset.provider=group.provider_id||group.provider||'';
+          if(model.supports_fast_tier===true||String(model.supports_fast_tier).toLowerCase()==='true') option.dataset.fast='1';
+          else if(model.supports_fast_tier===false||String(model.supports_fast_tier).toLowerCase()==='false') option.dataset.fast='0';
+          optgroup.appendChild(option);
         }
-        // Append live-fetched models for the active provider, same as the
-        // chat-header dropdown does via _fetchLiveModels() (#872).
-        if(models.active_provider && typeof _fetchLiveModels==='function'){
-          _fetchLiveModels(models.active_provider, modelSel);
-        }
-      }catch(e){}
-      _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';
-      _settingsHermesDefaultModelProviderOnOpen=(models&&models.active_provider)||null;
-      // Use the smart matcher so a saved bare form like "anthropic/claude-opus-4.6"
-      // (what the CLI's `hermes model` command writes) still selects the matching
-      // `@nous:anthropic/claude-opus-4.6` option on a Nous setup. Without this, the
-      // picker renders blank for any user whose default was persisted without the
-      // @-prefix — CLI-first users, legacy installs, etc.
-      if(typeof _applyModelToDropdown==='function'){
-        _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel, (models&&models.active_provider)||window._activeProvider||null);
-      }else{
-        modelSel.value=_settingsHermesDefaultModelOnOpen;
+        modelSource.appendChild(optgroup);
       }
-      if(typeof closeSettingsModelDropdown==='function') closeSettingsModelDropdown();
-      if(typeof mountSettingsModelPicker==='function') mountSettingsModelPicker();
-      modelSel.addEventListener('change',_markSettingsDirty,{once:false});
-      if(!modelSel._settingsChipSyncBound){
-        modelSel._settingsChipSyncBound=true;
-        modelSel.addEventListener('change',()=>{if(typeof syncSettingsModelChip==='function') syncSettingsModelChip();},{once:false});
+      if(models.active_provider&&typeof _fetchLiveModels==='function'){
+        await _fetchLiveModels(models.active_provider,modelSource);
+      }
+    }catch(e){}
+    if(!isCurrent()) return;
+    const beforeModelUpdate=window.settingsHost.getSnapshot();
+    if(catalogLoaded) modelOptions.length=0;
+    if(catalogLoaded){
+      for(const option of modelSource.options){
+        const provider=String(_getOptionProviderId(option)||'').trim();
+        const actualModel=String(option.dataset.model||option.value||'');
+        const model=actualModel.startsWith('@'+provider+':')?actualModel.slice(provider.length+2):actualModel;
+        const value=provider&&!actualModel.startsWith('@')?`@${provider}:${actualModel}`:actualModel;
+        const supportsFastTier=option.dataset.fast==='1'?true:option.dataset.fast==='0'?false:undefined;
+        modelOptions.push({value,model,provider:provider||undefined,label:option.textContent||actualModel,supportsFastTier});
       }
     }
-    // Auxiliary models — load task assignments and provider/model options
-    _bindMainAdvancedOptionsButton();
+    const rawServerModel=(models&&models.default_model)||settings.default_model||'';
+    let serverProvider=settings.default_model_provider||(models&&models.active_provider)||null;
+    const qualifiedOption=modelOptions.find(option=>option.value===rawServerModel);
+    const serverModel=qualifiedOption?qualifiedOption.model||qualifiedOption.value:(serverProvider?_modelBareNameForProvider(rawServerModel,serverProvider)||rawServerModel:rawServerModel);
+    if(qualifiedOption&&!settings.default_model_provider) serverProvider=qualifiedOption.provider||serverProvider;
+    if(!serverProvider&&serverModel){
+      const matchingModels=modelOptions.filter(option=>(option.model||option.value)===serverModel);
+      if(matchingModels.length===1) serverProvider=matchingModels[0].provider||null;
+    }
+    if(serverModel){
+      _settingsHermesDefaultModelOnOpen=serverModel;
+      _settingsHermesDefaultModelProviderOnOpen=serverProvider;
+    }else{
+      _settingsHermesDefaultModelOnOpen=beforeModelUpdate.baselines.model||'';
+      _settingsHermesDefaultModelProviderOnOpen=beforeModelUpdate.baselines.modelProvider||null;
+    }
+    if(_settingsHermesDefaultModelOnOpen&&!modelOptions.some(option=>
+      (option.model||option.value)===_settingsHermesDefaultModelOnOpen
+      &&(option.provider||null)===(_settingsHermesDefaultModelProviderOnOpen||null)
+    )){
+      const provider=_settingsHermesDefaultModelProviderOnOpen;
+      modelOptions.push({
+        value:provider?`@${provider}:${_settingsHermesDefaultModelOnOpen}`:_settingsHermesDefaultModelOnOpen,
+        model:_settingsHermesDefaultModelOnOpen,
+        provider:provider||undefined,
+        label:_settingsHermesDefaultModelOnOpen+' (configured)',
+      });
+    }
+    _settingsModelOptions=modelOptions;
+    const snapshot=window.settingsHost.getSnapshot();
+    window.settingsHost.setSnapshot({
+      ...snapshot,
+      preferences:{
+        ...snapshot.preferences,
+        ...(modelEditSeq===_settingsModelEditSeq&&serverModel?{
+          settingsModel:_settingsHermesDefaultModelOnOpen,
+          settingsModelProvider:_settingsHermesDefaultModelProviderOnOpen||'',
+        }:{}),
+      },
+      preferencesOptions:{...snapshot.preferencesOptions,models:modelOptions},
+      baselines:{
+        ...snapshot.baselines,
+        model:_settingsHermesDefaultModelOnOpen,
+        modelProvider:_settingsHermesDefaultModelProviderOnOpen,
+      },
+    });
+
     _loadAuxiliaryModels();
-    // Send key preference
-    const sendKeySel=$('settingsSendKey');
-    if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    // Language preference — populate from LOCALES bundle
-    const langSel=$('settingsLanguage');
-    if(langSel){
-      langSel.innerHTML='';
-      if(typeof LOCALES!=='undefined'){
-        for(const [code,bundle] of Object.entries(LOCALES)){
-          const opt=document.createElement('option');
-          opt.value=code;opt.textContent=bundle._label||code;
-          langSel.appendChild(opt);
-        }
-      }
-      langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',function(){
-        if(typeof setLocale==='function'){setLocale(this.value);if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();}
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const showUsageCb=$('settingsShowTokenUsage');
-    if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const maxTokensField=$('settingsMaxTokens');
-    if(maxTokensField){
-      const rawMaxTokens=settings.max_tokens;
-      const parsedMaxTokens=parseInt(rawMaxTokens,10);
-      const hasRootOverride=Number.isFinite(parsedMaxTokens)&&parsedMaxTokens>0;
-      maxTokensField.value=hasRootOverride
-        ? String(parsedMaxTokens)
-        : '';
-      _syncSettingsMaxTokensPlaceholder(maxTokensField,settings.max_tokens_fallback);
-      maxTokensField.dataset.initialValue=maxTokensField.value;
-      maxTokensField.addEventListener('input',_markSettingsDirty,{once:false});
-    }
-    // Ambient provider quota chip toggle — default off; only shows at ≥1400px viewport
-    // when enabled (see style.css @media (max-width:1399.98px) rule).
-    const showQuotaChipCb=$('settingsShowQuotaChip');
-    if(showQuotaChipCb){
-      showQuotaChipCb.checked=settings.show_quota_chip===true;
-      window._showQuotaChip=showQuotaChipCb.checked;
-      showQuotaChipCb.addEventListener('change',()=>{
-        window._showQuotaChip=showQuotaChipCb.checked;
-        if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const hideSuggestionsCb=$('settingsHideSuggestions');
-    if(hideSuggestionsCb){
-      hideSuggestionsCb.checked=settings.hide_empty_state_suggestions===true;
-      window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
-      if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
-      hideSuggestionsCb.addEventListener('change',()=>{
-        window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
-        if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const hideEmptyStatePanelCb=$('settingsHideEmptyStatePanel');
-    if(hideEmptyStatePanelCb){
-      hideEmptyStatePanelCb.checked=settings.hide_empty_state_panel===true;
-      window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
-      if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
-      hideEmptyStatePanelCb.addEventListener('change',()=>{
-        window._hideEmptyStatePanel=hideEmptyStatePanelCb.checked;
-        if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
-    if(virtualizeTranscriptCb){
-      // #4343: EXPERIMENTAL/opt-IN, default OFF. Honor a stored true only when
-      // it came from an explicit post-flip opt-in (===true); a pre-flip true is
-      // already reset to false server-side by the load_settings migration.
-      virtualizeTranscriptCb.checked=settings.virtualize_transcript===true;
-      window._virtualizeTranscript=virtualizeTranscriptCb.checked;
-      virtualizeTranscriptCb.addEventListener('change',()=>{
-        window._virtualizeTranscript=virtualizeTranscriptCb.checked;
-        // Re-render the open transcript so the change takes effect immediately
-        // (full render when off, windowed when on).
-        if(typeof renderMessages==='function'){ try{ renderMessages({preserveScroll:true}); }catch(e){ console.warn('[virtualize_transcript] renderMessages failed on toggle:',e); } }
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const showConversationOutlineCb=$('settingsShowConversationOutline');
-    if(showConversationOutlineCb){
-      showConversationOutlineCb.checked=settings.show_conversation_outline===true;
-      window._showConversationOutline=showConversationOutlineCb.checked;
-      document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
-      if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
-      showConversationOutlineCb.addEventListener('change',()=>{
-        _schedulePreferencesAutosave();
-        window._showConversationOutline=showConversationOutlineCb.checked;
-        document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
-        if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
-      },{once:false});
-    }
-    const showTpsCb=$('settingsShowTps');
-    if(showTpsCb){showTpsCb.checked=!!settings.show_tps;showTpsCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const pinnedLimitField=$('settingsPinnedSessionsLimit');
-    if(pinnedLimitField){
-      pinnedLimitField.value=parseInt(settings.pinned_sessions_limit||3,10)||3;
-      window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;
-      pinnedLimitField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-      pinnedLimitField.addEventListener('input',()=>{window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;_schedulePreferencesAutosave();},{once:false});
-    }
-    const fadeTextCb=$('settingsFadeTextEffect');
-    if(fadeTextCb){
-      fadeTextCb.checked=!!settings.fade_text_effect;
-      window._fadeTextEffect=fadeTextCb.checked;
-      fadeTextCb.addEventListener('change',()=>{
-        window._fadeTextEffect=fadeTextCb.checked;
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
-    if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
-    if(workspaceTodosTabCb){
-      workspaceTodosTabCb.checked=!!settings.workspace_todos_tab;
-      window._workspaceTodosTab=workspaceTodosTabCb.checked;
-      _applyWorkspaceTodosTabVisibility();
-      workspaceTodosTabCb.addEventListener('change',()=>{
-        window._workspaceTodosTab=workspaceTodosTabCb.checked;
-        _applyWorkspaceTodosTabVisibility();
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const apiRedactCb=$('settingsApiRedact');
-    if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const showCliCb=$('settingsShowCliSessions');
-    if(showCliCb){showCliCb.checked=settings.show_cli_sessions!==false;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
-    if(showClaudeCodeCb){
-      showClaudeCodeCb.checked=!!settings.show_claude_code_sessions;
-      showClaudeCodeCb.disabled=showCliCb?!showCliCb.checked:true;
-      showClaudeCodeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-    }
-    if(showCliCb){showCliCb.addEventListener('change',function(){
-      const enabled=!!showCliCb.checked;
-      if(showCronCb) showCronCb.disabled=!enabled;
-      if(showClaudeCodeCb) showClaudeCodeCb.disabled=!enabled;
-      _schedulePreferencesAutosave();
-    },{once:false});}
-    const showCronCb=$('settingsShowCronSessions');
-    if(showCronCb){
-      showCronCb.checked=!!settings.show_cron_sessions;
-      showCronCb.disabled=showCliCb?!showCliCb.checked:true;
-      showCronCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-    }
-    const showWebhookCb=$('settingsShowWebhookSessions');
-    if(showWebhookCb){
-      showWebhookCb.checked=!!settings.show_webhook_sessions;
-      showWebhookCb.disabled=showCliCb?!showCliCb.checked:true;
-      showWebhookCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-      if(showCliCb){showCliCb.addEventListener('change',function(){showWebhookCb.disabled=!showCliCb.checked;},{once:false});}
-    }
-    const showKanbanCb=$('settingsShowKanbanSessions');
-    if(showKanbanCb){
-      showKanbanCb.checked=!!settings.show_kanban_sessions;
-      showKanbanCb.disabled=showCliCb?!showCliCb.checked:true;
-      showKanbanCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-      if(showCliCb){showCliCb.addEventListener('change',function(){showKanbanCb.disabled=!showCliCb.checked;},{once:false});}
-    }
-    const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
-    if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const syncCb=$('settingsSyncInsights');
-    if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const updateCb=$('settingsCheckUpdates');
-    if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const updateChannelSel=$('settingsUpdateChannel');
-    if(updateChannelSel){
-      updateChannelSel.value=settings.update_channel==='experimental'?'experimental':'stable';
-      _confirmedUpdateChannel=updateChannelSel.value; // #6612: seed revert baseline
-      updateChannelSel.addEventListener('change',function(){
-        // #6612: use the dedicated channel writer so generic preference autosaves
-        // from a stale tab cannot overwrite a newer explicit channel selection.
-        // Update check, badge sync, and failure status are handled inside
-        // _saveUpdateChannelFromSelector after the POST is confirmed.
-        _saveUpdateChannelFromSelector(updateChannelSel);
-      },{once:false});
-    }
-    const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
-    if(ignoreAgentUpdatesCb){ignoreAgentUpdatesCb.checked=!!settings.ignore_agent_updates;ignoreAgentUpdatesCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const whatsNewSummaryCb=$('settingsWhatsNewSummary');
-    if(whatsNewSummaryCb){whatsNewSummaryCb.checked=!!settings.whats_new_summary_enabled;whatsNewSummaryCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    const soundCb=$('settingsSoundEnabled');
-    if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    // Right-to-left chat layout (#1721 salvage) — Settings-only, no composer button.
-    const rtlCb=$('settingsRtl');
-    if(rtlCb){
-      const saved=!!settings.rtl || localStorage.getItem('hermes-rtl')==='true';
-      rtlCb.checked=saved;
-      try{localStorage.setItem('hermes-rtl',saved?'true':'false');}catch(_){}
-      document.documentElement.classList.toggle('chat-content-rtl',saved);
-      rtlCb.addEventListener('change',()=>{
-        const on=rtlCb.checked;
-        try{localStorage.setItem('hermes-rtl',on?'true':'false');}catch(_){}
-        document.documentElement.classList.toggle('chat-content-rtl',on);
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    if(typeof window._mirrorSpeechSettingsFromServer==='function') window._mirrorSpeechSettingsFromServer(settings);
-    const persistedSpeechKeys = new Set(
-      Array.isArray(settings && settings.persisted_speech_keys)
-        ? settings.persisted_speech_keys
-        : []
-    );
+    const localeOptions=typeof LOCALES!=='undefined'?Object.entries(LOCALES).map(([code,bundle])=>({value:code,label:bundle._label||code})):[];
+    window.settingsHost.setLocaleOptions(localeOptions);
     _captureSpeechPreferenceOwnership(settings);
-    const _speechSetting=function(key,storageKey,fallback,kind){
-      const stored=localStorage.getItem(storageKey);
-      if(settings&&persistedSpeechKeys.has(key)) return settings[key];
-      return stored===null?fallback:stored;
-    };
-    const _speechBool=function(key,storageKey,fallback){
-      const value=_speechSetting(key,storageKey,fallback,'bool');
-      return value===true||value==='true';
-    };
-    const rawAudioCb=$('settingsRawAudio');
-    if(rawAudioCb){
-      rawAudioCb.checked=_speechBool('raw_audio_mode','hermes-raw-audio-mode',false);
-      rawAudioCb.onchange=function(){
-        _markSpeechPreferenceChanged('raw_audio_mode');
-        if(typeof window._applyRawAudioModePreference==='function') window._applyRawAudioModePreference(this.checked);
-        else localStorage.setItem('hermes-raw-audio-mode',this.checked?'true':'false');
-        _schedulePreferencesAutosave();
-      };
-    }
-    const voiceContinuous=_speechBool('voice_continuous','hermes-voice-continuous',false);
-    _syncSpeechPreferenceCache('voice_continuous',voiceContinuous?'true':'false');
-    const voiceSilence=parseInt(_speechSetting('voice_silence_ms','hermes-voice-silence-ms',1800),10);
-    _syncSpeechPreferenceCache('voice_silence_ms',Number.isFinite(voiceSilence)&&voiceSilence>=200?String(voiceSilence):'1800');
-    // TTS settings use /api/settings as the durable source and localStorage as the runtime cache.
-    const ttsEnabledCb=$('settingsTtsEnabled');
-    if(ttsEnabledCb){ttsEnabledCb.checked=_speechBool('tts_enabled','hermes-tts-enabled',false);ttsEnabledCb.onchange=function(){_markSpeechPreferenceChanged('tts_enabled');localStorage.setItem('hermes-tts-enabled',this.checked?'true':'false');_applyTtsEnabled(this.checked);_schedulePreferencesAutosave();};}
-    const ttsAutoReadCb=$('settingsTtsAutoRead');
-    if(ttsAutoReadCb){ttsAutoReadCb.checked=_speechBool('tts_auto_read','hermes-tts-auto-read',false);ttsAutoReadCb.onchange=function(){_markSpeechPreferenceChanged('tts_auto_read');localStorage.setItem('hermes-tts-auto-read',this.checked?'true':'false');_schedulePreferencesAutosave();};}
-    // Voice-mode button visibility (#1488).
-    // Toggling re-applies immediately via the boot.js helper so the user sees
-    // the audio-waveform button appear/disappear without a reload.
-    // Also recomputes composer footer visibility so the .composer-divider
-    // (which tracks whether all left-group buttons are hidden, see #5451)
-    // stays in sync when #btnVoiceMode appears or disappears here.
-    const voiceModeCb=$('settingsVoiceModeEnabled');
-    if(voiceModeCb){
-      voiceModeCb.checked=_speechBool('voice_mode_button','hermes-voice-mode-button',false);
-      voiceModeCb.onchange=function(){
-        _markSpeechPreferenceChanged('voice_mode_button');
-        localStorage.setItem('hermes-voice-mode-button',this.checked?'true':'false');
-        if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
-        if(typeof window._applyComposerFooterVisibilitySettings==='function') window._applyComposerFooterVisibilitySettings();
-        _schedulePreferencesAutosave();
-      };
-    }
-    // TTS engine selector
-    const ttsEngineSel=$('settingsTtsEngine');
-    if(ttsEngineSel){
-      // Re-add any extension-registered TTS engines (window.registerHermesTtsEngine)
-      // as options — the <select> markup only hardcodes the built-ins, and this
-      // settings panel can render after an extension registered its engine.
-      if(typeof window._hermesTtsEngineOptions==='function'){
-        window._hermesTtsEngineOptions().forEach(function(e){
-          if(!ttsEngineSel.querySelector('option[value="'+e.id+'"]')){
-            var opt=document.createElement('option');
-            opt.value=e.id; opt.textContent=e.label;
-            ttsEngineSel.appendChild(opt);
-          }
-        });
-      }
-      const saved=String(_speechSetting('tts_engine','hermes-tts-engine','browser')||'browser');
-      if(!ttsEngineSel.querySelector('option[value="'+saved+'"]')){
-        var savedOpt=document.createElement('option');
-        savedOpt.value=saved; savedOpt.textContent=saved;
-        ttsEngineSel.appendChild(savedOpt);
-      }
-      ttsEngineSel.value=saved;
-      _syncSpeechPreferenceCache('tts_engine',saved);
-      ttsEngineSel.onchange=function(){
-        _markSpeechPreferenceChanged('tts_engine');
-        localStorage.setItem('hermes-tts-engine',this.value);
-        window._populateTtsVoices();
-        _schedulePreferencesAutosave();
-      };
-    }
-    // Populate voice selector based on engine
-    const ttsVoiceSel=$('settingsTtsVoice');
-    window._populateTtsVoices=function(){
-      if(!ttsVoiceSel) return;
-      const engine=localStorage.getItem('hermes-tts-engine')||'browser';
-      const current=String(_speechSetting('tts_voice','hermes-tts-voice','')||'');
-      _syncSpeechPreferenceCache('tts_voice',current);
-      if(engine==='elevenlabs'){
-        ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
-      } else if(engine==='openai'){
-        ttsVoiceSel.innerHTML='<option value="">OpenAI voice (server-configured)</option>';
-      } else if(engine==='edge'){
-        const edgeVoices=[
-          {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
-          {value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},
-          {value:'zh-CN-YunxiNeural',label:'Yunxi (Chinese, Male)'},
-          {value:'zh-CN-YunjianNeural',label:'Yunjian (Chinese, Male)'},
-          {value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},
-          {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
-          {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
-          {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
-        ];
-        ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
-        edgeVoices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.value;opt.textContent=v.label;
-          if(v.value===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
-        });
-      } else {
-        if(!('speechSynthesis' in window)){
-          ttsVoiceSel.innerHTML='<option value="">Speech synthesis not available</option>';
-          return;
-        }
-        const voices=speechSynthesis.getVoices();
-        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
-        voices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
-          if(v.name===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
-        });
-      }
-    };
-    if(ttsVoiceSel&&'speechSynthesis' in window){
-      window._populateTtsVoices();
-      speechSynthesis.addEventListener('voiceschanged',function(){
-        const engine=localStorage.getItem('hermes-tts-engine')||'browser';
-        if(engine==='browser') window._populateTtsVoices();
-      },{once:false});
-      ttsVoiceSel.onchange=function(){_markSpeechPreferenceChanged('tts_voice');localStorage.setItem('hermes-tts-voice',this.value);_schedulePreferencesAutosave();};
-    }
-    // TTS rate/pitch sliders
-    const ttsRateSlider=$('settingsTtsRate');
-    const ttsRateValue=$('settingsTtsRateValue');
-    if(ttsRateSlider){
-      const savedRate=_speechSetting('tts_rate','hermes-tts-rate',1);
-      ttsRateSlider.value=(savedRate===null||savedRate===undefined)?'1':String(savedRate);
-      if(ttsRateValue) ttsRateValue.textContent=parseFloat(ttsRateSlider.value).toFixed(1)+'x';
-      _syncSpeechPreferenceCache('tts_rate',ttsRateSlider.value);
-      ttsRateSlider.oninput=function(){_markSpeechPreferenceChanged('tts_rate');if(ttsRateValue)ttsRateValue.textContent=parseFloat(this.value).toFixed(1)+'x';localStorage.setItem('hermes-tts-rate',this.value);_schedulePreferencesAutosave();};
-    }
-    const ttsPitchSlider=$('settingsTtsPitch');
-    const ttsPitchValue=$('settingsTtsPitchValue');
-    if(ttsPitchSlider){
-      const savedPitch=_speechSetting('tts_pitch','hermes-tts-pitch',1);
-      ttsPitchSlider.value=(savedPitch===null||savedPitch===undefined)?'1':String(savedPitch);
-      if(ttsPitchValue) ttsPitchValue.textContent=parseFloat(ttsPitchSlider.value).toFixed(1);
-      _syncSpeechPreferenceCache('tts_pitch',ttsPitchSlider.value);
-      ttsPitchSlider.oninput=function(){_markSpeechPreferenceChanged('tts_pitch');if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);localStorage.setItem('hermes-tts-pitch',this.value);_schedulePreferencesAutosave();};
-    }
-    const notifCb=$('settingsNotificationsEnabled');
-    if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    // show_thinking has no settings panel checkbox — controlled via /reasoning show|hide
-    const sidebarDensitySel=$('settingsSidebarDensity');
-    if(sidebarDensitySel){
-      sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
-      sidebarDensitySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-    }
-    const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
-    if(autoTitleRefreshSel){
-      const val=String(settings.auto_title_refresh_every||'0');
-      autoTitleRefreshSel.value=['0','5','10','20'].includes(val)?val:'0';
-      autoTitleRefreshSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-    }
-    // Default message mode
-    const defaultMessageModeSel=$('settingsDefaultMessageMode');
-    if(defaultMessageModeSel){
-      const val=String(settings.default_message_mode||settings.busy_input_mode||'steer');
-      defaultMessageModeSel.value=['queue','interrupt','steer'].includes(val)?val:'steer';
-      // #5170 mirror write on panel load, under the #5145 rename.
-      window._defaultMessageMode=(typeof _persistDefaultMessageMode==='function')?_persistDefaultMessageMode(defaultMessageModeSel.value):defaultMessageModeSel.value;
-      defaultMessageModeSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-    }
-    const showBusyPlaceholderHintCb=$('settingsShowBusyPlaceholderHint');
-    if(showBusyPlaceholderHintCb){
-      showBusyPlaceholderHintCb.checked=!!settings.show_busy_placeholder_hint;
-      window._showBusyPlaceholderHint=showBusyPlaceholderHintCb.checked;
-      showBusyPlaceholderHintCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-    }
+    if(typeof window._mirrorSpeechSettingsFromServer==='function') window._mirrorSpeechSettingsFromServer(settings);
+    window._sendKey=hydrated.preferences.settingsSendKey;
+    window._showTokenUsage=!!settings.show_token_usage;
+    window._showQuotaChip=settings.show_quota_chip===true;
+    window._showConversationOutline=settings.show_conversation_outline===true;
+    window._showTps=!!settings.show_tps;
+    window._fadeTextEffect=!!settings.fade_text_effect;
+    window._showCliSessions=settings.show_cli_sessions!==false;
+    window._showPreviousMessagingSessions=!!settings.show_previous_messaging_sessions;
+    window._soundEnabled=settings.sound_enabled;
+    window._notificationsEnabled=settings.notifications_enabled;
+    window._whatsNewSummaryEnabled=!!settings.whats_new_summary_enabled;
+    window._terminalAutoExpandOnOutput=!!settings.terminal_auto_expand_on_output;
+    window._workspaceTodosTab=!!settings.workspace_todos_tab;
+    _applyWorkspaceTodosTabVisibility();
+    window._showBusyPlaceholderHint=!!settings.show_busy_placeholder_hint;
+    window._newChatOnWorkspaceSwitch=!!settings.new_chat_on_workspace_switch;
+    window._pinnedSessionsLimit=parseInt(settings.pinned_sessions_limit,10)||3;
+    window._defaultMessageMode=(typeof _persistDefaultMessageMode==='function')?_persistDefaultMessageMode(settings.default_message_mode||settings.busy_input_mode):((settings.default_message_mode||settings.busy_input_mode)||'steer');
+    window._botName=settings.bot_name||'Hermes';
+    if(typeof applyBotName==='function') applyBotName();
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
-    const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
-    if(newChatOnWorkspaceSwitchCb){
-      newChatOnWorkspaceSwitchCb.checked=!!settings.new_chat_on_workspace_switch;
-      window._newChatOnWorkspaceSwitch=newChatOnWorkspaceSwitchCb.checked;
-      newChatOnWorkspaceSwitchCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+    if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();
+    document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';
+    if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
+    document.documentElement.classList.toggle('chat-content-rtl',!!settings.rtl||localStorage.getItem('hermes-rtl')==='true');
+    const savedEngine=String(hydrated.preferences.settingsTtsEngine||'browser');
+    _syncSpeechPreferenceCache('tts_engine',savedEngine);
+    const engineOptions=[
+      {value:'browser',label:'Browser speech synthesis'},{value:'edge',label:'Edge TTS (server)'},
+      {value:'elevenlabs',label:'ElevenLabs (server)'},{value:'openai',label:'OpenAI TTS (server)'},
+      ...(typeof window._hermesTtsEngineOptions==='function'?window._hermesTtsEngineOptions().map(engine=>({value:engine.id,label:engine.label})):[]),
+    ];
+    if(!engineOptions.some(option=>option.value===savedEngine)) engineOptions.push({value:savedEngine,label:savedEngine});
+    window.settingsHost.setTtsEngineOptions(engineOptions);
+    window._populateTtsVoices=function(){
+      const currentSnapshot=window.settingsHost.getSnapshot();
+      const engine=String(currentSnapshot.preferences.settingsTtsEngine||'browser');
+      const current=String(currentSnapshot.preferences.settingsTtsVoice||'');
+      let voices=[];
+      if(engine==='elevenlabs') voices=[{value:'',label:'Hermy — ElevenLabs (server-configured)'}];
+      else if(engine==='openai') voices=[{value:'',label:'OpenAI voice (server-configured)'}];
+      else if(engine==='edge') voices=[{value:'',label:'Default (Xiaoxiao)'},{value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},{value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},{value:'zh-CN-YunxiNeural',label:'Yunxi (Chinese, Male)'},{value:'zh-CN-YunjianNeural',label:'Yunjian (Chinese, Male)'},{value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},{value:'en-US-AriaNeural',label:'Aria (English, Female)'},{value:'en-US-GuyNeural',label:'Guy (English, Male)'},{value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'}];
+      else if(!('speechSynthesis' in window)) voices=[{value:'',label:'Speech synthesis not available'}];
+      else voices=[{value:'',label:'Default system voice'},...speechSynthesis.getVoices().map(voice=>({value:voice.name,label:voice.name+(voice.lang?' ('+voice.lang+')':'' )}))];
+      if(current&&!voices.some(option=>option.value===current)) voices.push({value:current,label:current+' (configured)'});
+      window.settingsHost.setVoiceOptions(voices);
+    };
+    window._populateTtsVoices();
+    if('speechSynthesis' in window&&!window._settingsVoiceRefreshBound){
+      window._settingsVoiceRefreshBound=true;
+      speechSynthesis.addEventListener('voiceschanged',()=>{if((window.settingsHost.getSnapshot().preferences.settingsTtsEngine||'browser')==='browser') window._populateTtsVoices();});
     }
-    // Bot name — debounced autosave (text input)
-    const botNameField=$('settingsBotName');
-    if(botNameField){
-      botNameField.value=settings.bot_name||'Hermes';
-      let botNameTimer=null;
-      botNameField.addEventListener('input',()=>{
-        if(botNameTimer) clearTimeout(botNameTimer);
-        botNameTimer=setTimeout(_schedulePreferencesAutosave,500);
-      },{once:false});
-    }
+    _applyTtsEnabled(!!hydrated.preferences.settingsTtsEnabled);
+    if(typeof window._applyRawAudioModePreference==='function') window._applyRawAudioModePreference(hydrated.preferences.settingsRawAudio);
+    if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
+    if(typeof window._applyComposerFooterVisibilitySettings==='function') window._applyComposerFooterVisibilitySettings();
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField){pwField.value='';pwField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -9767,9 +9252,30 @@ async function loadSettingsPanel(){
     loadProvidersPanel(); // load provider cards in background
     loadPluginsPanel(); // load plugin/hook visibility in background
     loadExtensionsPanel(); // load extension diagnostics in background
+    if(!isCurrent()) return;
+    const settingsSnapshot=_settingsSnapshotFromServer(settings,window.settingsHost.getSnapshot());
+    for(const edit of _settingsReactEdits.values()){
+      if(edit.seq>userEditSeqAtStart&&edit.generation===profileGeneration) settingsSnapshot[edit.pane][edit.id]=edit.value;
+    }
+    if(_settingsReactOptionEdit&&_settingsReactOptionEdit.seq>userEditSeqAtStart&&_settingsReactOptionEdit.generation===profileGeneration){
+      settingsSnapshot.appearanceOptions=_settingsReactOptionEdit.options;
+    }
+    if(_settingsReactAuxEdit&&_settingsReactAuxEdit.seq>userEditSeqAtStart&&_settingsReactAuxEdit.generation===profileGeneration){
+      settingsSnapshot.preferencesOptions.auxiliary=_settingsReactAuxEdit.rows;
+      settingsSnapshot.auxiliaryDirty=true;
+    }
+    settingsSnapshot.loaded=true;
+    settingsSnapshot.loadError='';
+    window.settingsHost.setSnapshot(settingsSnapshot);
     switchSettingsSection(_settingsSection);
   }catch(e){
-    showToast(t('settings_load_failed')+e.message);
+    if(isCurrent()){
+      if(window.settingsHost){
+        const current=window.settingsHost.getSnapshot();
+        window.settingsHost.setSnapshot({...current,loaded:false,loadError:String(e&&e.message||e)});
+      }
+      showToast(t('settings_load_failed')+e.message);
+    }
   }
 }
 
@@ -11883,23 +11389,46 @@ async function _saveSelfHostedProvider(providerId){
 // flushes the JS-side caches so the next render rebuilds from a fresh
 // /api/models response. Wrapped in a try/catch so a UI module that hasn't
 // loaded yet (e.g. during early Settings open) cannot break the save flow.
+async function _refreshSettingsModelOptions(){
+  const data=await api('/api/models');
+  const options=[];
+  for(const group of data.groups||[]){
+    const provider=String(group.provider_id||group.provider||'');
+    for(const model of [...(group.models||[]),...(group.extra_models||[])]){
+      const actual=String(model.id||'');
+      options.push({
+        value:provider&&!actual.startsWith('@')?`@${provider}:${actual}`:actual,
+        model:_modelBareNameForProvider(actual,provider)||actual,
+        provider:provider||undefined,
+        label:model.label||actual,
+        ...(model.supports_fast_tier!==undefined?{supportsFastTier:model.supports_fast_tier===true||String(model.supports_fast_tier).toLowerCase()==='true'}:{}),
+      });
+    }
+  }
+  const current=window.settingsHost.getSnapshot();
+  const selected=String(current.preferences.settingsModel||'');
+  let provider=String(current.preferences.settingsModelProvider||'');
+  if(!provider&&selected===(data.default_model||'')) provider=String(data.default_model_provider||data.active_provider||'');
+  const matching=options.filter(option=>(option.model||option.value)===selected);
+  if(!provider&&matching.length===1) provider=matching[0].provider||'';
+  if(selected&&!options.some(option=>(option.model||option.value)===selected&&(option.provider||'')===provider)){
+    options.push({value:provider?`@${provider}:${selected}`:selected,model:selected,provider:provider||undefined,label:selected+' (configured)'});
+  }
+  window.settingsHost.setSnapshot({
+    ...current,
+    preferences:{...current.preferences,...(!current.preferences.settingsModelProvider&&provider?{settingsModelProvider:provider}:{})},
+    preferencesOptions:{...current.preferencesOptions,models:options},
+  });
+}
+window._refreshSettingsModelOptions=_refreshSettingsModelOptions;
 function _refreshModelDropdownsAfterProviderChange(){
   try{
-    if(typeof window._invalidateSlashModelCache==='function'){
-      window._invalidateSlashModelCache();
-    }
-    // Fire-and-forget: don't block the providers panel refresh on a
-    // dropdown rebuild. The composer/Settings dropdowns will catch up
-    // on the very next paint frame.
-    if(typeof window._ensureModelDropdownReady==='function'){
-      window._modelDropdownReady=null;
-      Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
-    }else if(typeof populateModelDropdown==='function'){
-      Promise.resolve(populateModelDropdown()).catch(()=>{});
-    }
-  }catch(_e){
-    // Swallow — dropdown refresh is best-effort, providers panel must still update.
-  }
+    if(typeof window._invalidateSlashModelCache==='function') window._invalidateSlashModelCache();
+    const modelsReady=typeof window._ensureModelDropdownReady==='function'
+      ?(window._modelDropdownReady=null,Promise.resolve(window._ensureModelDropdownReady()))
+      :typeof populateModelDropdown==='function'?Promise.resolve(populateModelDropdown()):Promise.resolve();
+    modelsReady.then(()=>window._refreshSettingsModelOptions()).catch(()=>{});
+  }catch(_e){}
 }
 
 async function _refreshProviderModels(providerId, btn){
@@ -12135,16 +11664,6 @@ function _applySavedSettingsUi(saved, body, opts){
   _renderComposerControlChips();
   _renderComposerSituationalControlChips();
   if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
-  const maxTokensField=$('settingsMaxTokens');
-  if(maxTokensField){
-    const savedRawMaxTokens=saved&&saved.max_tokens;
-    const parsedSavedMaxTokens=parseInt(savedRawMaxTokens,10);
-    maxTokensField.value=(Number.isFinite(parsedSavedMaxTokens)&&parsedSavedMaxTokens>0)
-      ? String(parsedSavedMaxTokens)
-      : '';
-    _syncSettingsMaxTokensPlaceholder(maxTokensField,saved&&saved.max_tokens_fallback);
-    maxTokensField.dataset.initialValue=maxTokensField.value;
-  }
   if(typeof startGatewaySSE==='function'){
     if(showCliSessions) startGatewaySSE();
     else if(typeof stopGatewaySSE==='function') stopGatewaySSE();
@@ -12162,6 +11681,20 @@ function _applySavedSettingsUi(saved, body, opts){
   if(body.default_model) window._defaultModel=body.default_model;
   if(Object.prototype.hasOwnProperty.call(body,'default_model_provider')) window._activeProvider=body.default_model_provider||null;
   if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+  const currentSnapshot=window.settingsHost.getSnapshot();
+  const savedSettings={...body,...(saved||{})};
+  for(const [pane,fields] of Object.entries(_settingsSnapshotServerFields)){
+    for(const [id,[key]] of Object.entries(fields)){
+      if(key&&!Object.prototype.hasOwnProperty.call(savedSettings,key)&&Object.prototype.hasOwnProperty.call(currentSnapshot[pane],id)) savedSettings[key]=currentSnapshot[pane][id];
+    }
+  }
+  if(!Object.prototype.hasOwnProperty.call(savedSettings,'max_tokens_fallback')) savedSettings.max_tokens_fallback=currentSnapshot.baselines.maxTokensFallback;
+  const hydratedSettings=_settingsSnapshotFromServer(savedSettings,currentSnapshot);
+  hydratedSettings.baselines.maxTokens=hydratedSettings.preferences.settingsMaxTokens;
+  hydratedSettings.preferences.settingsPassword='';
+  hydratedSettings.preferences.settingsCurrentPassword='';
+  hydratedSettings.auxiliaryDirty=false;
+  window.settingsHost.setSnapshot(hydratedSettings);
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();
   if(typeof renderSessionList==='function') renderSessionList();
@@ -12270,10 +11803,8 @@ let _auxProviders=[];       // cached provider list from /api/models
 let _auxTasks=[];           // sanitized auxiliary task configs from /api/model/auxiliary
 let _auxOriginalConfig=null; // snapshot of initial config for dirty detection
 let _mainAdvancedConfig=null; // current advanced config for the default chat model
+let _auxLoadSeq=0;
 
-function _auxSelectStyle(){
- return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
-}
 
 function _auxTaskLabelFromMeta(taskKey, taskCfg){
   const nameKey='settings_aux_task_'+taskKey;
@@ -12319,119 +11850,21 @@ function _normalizeAuxiliaryTasks(rawTasks){
   return out;
 }
 
-function _buildAuxProviderOptions(sel,providers,currentProvider){
- sel.innerHTML='';
- // "auto" = use main model
- const autoOpt=document.createElement('option');
- autoOpt.value='auto';autoOpt.textContent='auto ('+t('settings_aux_provider_auto')+')';
- if(currentProvider==='auto'||!currentProvider) autoOpt.selected=true;
- sel.appendChild(autoOpt);
- let matched=currentProvider==='auto'||!currentProvider;
- for(const p of providers){
-  const opt=document.createElement('option');
-  opt.value=p.slug;opt.textContent=p.name;
-  if(p.slug===currentProvider){opt.selected=true;matched=true;}
-  sel.appendChild(opt);
- }
- // The configured provider can be absent from the /api/models catalog (e.g. its
- // group exposes no models). Keep it selectable: with no matching option the
- // select falls back to its first entry ('auto') and the next Apply would
- // persist that, silently discarding the configured value.
- if(!matched&&currentProvider){
-  const configuredOpt=document.createElement('option');
-  configuredOpt.value=currentProvider;configuredOpt.textContent=currentProvider+' (configured)';
-  configuredOpt.selected=true;
-  sel.appendChild(configuredOpt);
- }
-}
-
-function _buildAuxModelOptions(sel,provider,providers,currentModel){
- sel.innerHTML='';
- const emptyOpt=document.createElement('option');
- emptyOpt.value='';emptyOpt.textContent=t('settings_aux_model_auto')||'auto (use provider default)';
- sel.appendChild(emptyOpt);
- const canonicalCurrent=_modelBareNameForProvider(currentModel,provider)||'';
- if(!provider||provider==='auto'){
-  sel.value=canonicalCurrent;
-  return canonicalCurrent;
- }
- // Find matching provider in cached list
- const pData=providers.find(p=>p.slug===provider);
- // A provider kept in the list only because its models endpoint failed would
- // otherwise render as a silent, empty model select. Echo the same hint the
- // main picker shows instead of implying "no models to choose from". (#7521)
- if(pData&&pData.modelsEndpointError){
-  const errOpt=document.createElement('option');
-  errOpt.value='';errOpt.disabled=true;
-  errOpt.dataset.modelsEndpointError='1';
-  errOpt.textContent='\u26a0 '+(pData.modelsEndpointError.message||'Models endpoint could not be reached for this provider.');
-  sel.appendChild(errOpt);
- }
- const modelValues=new Set();
- if(pData&&pData.models){
-  for(const modelEntry of pData.models){
-   const routeId=typeof modelEntry==='string'?modelEntry:String(modelEntry?.id||'');
-   const mId=_modelBareNameForProvider(routeId,provider)||'';
-   if(!mId||modelValues.has(mId)) continue;
-   modelValues.add(mId);
-   const routeLabel=typeof modelEntry==='string'?'':String(modelEntry?.label||'');
-   const modelLabel=_modelBareNameForProvider(routeLabel,provider)||mId;
-   const opt=document.createElement('option');
-   opt.value=mId;opt.textContent=modelLabel;
-   if(mId===canonicalCurrent) opt.selected=true;
-   sel.appendChild(opt);
-  }
- }
- // Always allow custom model — add a text input option hint
- const customOpt=document.createElement('option');
- customOpt.value='__custom__';customOpt.textContent=t('settings_aux_model_custom')||'Custom model…';
- sel.appendChild(customOpt);
- // If currentModel not in list and not empty, add it as a custom option
- if(canonicalCurrent&&!modelValues.has(canonicalCurrent)){
-  const existingOpt=document.createElement('option');
-  existingOpt.value=canonicalCurrent;existingOpt.textContent=canonicalCurrent+' (configured)';
-  existingOpt.selected=true;
-  sel.insertBefore(existingOpt,customOpt);
- }
- return canonicalCurrent;
-}
-
-function _onAuxProviderChange(taskKey,providers){
- const provSel=$('aux-prov-'+taskKey);
- const modelSel=$('aux-model-'+taskKey);
- if(!provSel||!modelSel) return;
- const provider=provSel.value;
- _buildAuxModelOptions(modelSel,provider,providers,'');
- _markAuxDirty();
-}
-
-async function _onAuxModelChange(taskKey){
- const modelSel=$('aux-model-'+taskKey);
- if(!modelSel) return;
- if(modelSel.value==='__custom__'){
-  const customModel=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
-  if(customModel&&customModel.trim()){
-   const provider=$('aux-prov-'+taskKey)?.value||'';
-   const enteredModel=customModel.trim();
-   const canonicalModel=_modelBareNameForProvider(enteredModel,provider)||enteredModel;
-   // Insert custom model option before the __custom__ option
-   const opt=document.createElement('option');
-   opt.value=canonicalModel;opt.textContent=canonicalModel;
-   // Remove __custom__ selection
-   const customIdx=[...modelSel.options].findIndex(o=>o.value==='__custom__');
-   if(customIdx>=0) modelSel.insertBefore(opt,modelSel.options[customIdx]);
-   modelSel.value=canonicalModel;
-  }else{
-   modelSel.value='';
-  }
- }
- _markAuxDirty();
-}
 
 function _markAuxDirty(){
- const applyBtn=$('btnApplyAuxModels');
- if(applyBtn) applyBtn.style.display='';
- _markSettingsDirty();
+  _markSettingsDirty();
+}
+function _markAuxClean(){
+  const snapshot=window.settingsHost.getSnapshot();
+  const model=String(snapshot.preferences.settingsModel||'');
+  const provider=String(snapshot.preferences.settingsModelProvider||'')||null;
+  const modelDirty=model!==(_settingsHermesDefaultModelOnOpen||'')||provider!==(_settingsHermesDefaultModelProviderOnOpen||null);
+  const maxTokensDirty=String(snapshot.preferences.settingsMaxTokens||'')!==String(snapshot.baselines.maxTokens||'');
+  if(!modelDirty&&!maxTokensDirty&&!$('settingsPassword')?.value){
+    _settingsDirty=false;
+    const bar=$('settingsUnsavedBar');
+    if(bar) bar.style.display='none';
+  }
 }
 
 function _auxAdvancedValue(cfg,key){
@@ -12524,8 +11957,9 @@ function _openAuxAdvancedOptions(taskCfg,cfg){
     if(!extra||Array.isArray(extra)||typeof extra!=='object'){if(typeof showToast==='function') showToast(t('settings_aux_advanced_extra_body_object_required')||'Extra body must be a JSON object');return;}
    }
    const provSel=isMain?null:$('aux-prov-'+taskKey),modelSel=isMain?$('settingsModel'):$('aux-model-'+taskKey);
-   const provider=isMain?((cfg&&cfg.provider)||''):(provSel?provSel.value:((cfg&&cfg.provider)||'auto'));
-   const model=modelSel&&modelSel.value!=='__custom__'?(modelSel.value||''):((cfg&&cfg.model)||'');
+   const modelState=isMain&&modelSel?_captureModelDropdownSelection(modelSel):null;
+   const provider=isMain?(modelState&&modelState.model_provider||((cfg&&cfg.provider)||'')):(provSel?provSel.value:((cfg&&cfg.provider)||'auto'));
+   const model=modelState&&modelState.model|| (modelSel&&modelSel.value!=='__custom__'?(modelSel.value||''):((cfg&&cfg.model)||''));
    const advanced={
     base_url:$('auxAdvancedBaseUrl')?.value||'',
     extra_body:extra,
@@ -12562,53 +11996,6 @@ function _openAuxAdvancedOptions(taskCfg,cfg){
  setTimeout(()=>$('auxAdvancedBaseUrl')?.focus(),0);
 }
 
-function _bindMainAdvancedOptionsButton(){
- const modelSel=$('settingsModel');
- let btn=$('mainAdvancedBtn');
- if(modelSel){
-  const parent=modelSel.parentElement;
-  let row=parent&&parent.classList&&parent.classList.contains('model-advanced-row')?parent:null;
-  if(!row){
-   row=document.createElement('div');
-   row.className='model-advanced-row';
-   parent.insertBefore(row,modelSel);
-   row.appendChild(modelSel);
-  }
-  if(!btn){
-   btn=document.createElement('button');
-   btn.type='button';
-   btn.id='mainAdvancedBtn';
-  }
-  if(btn.parentElement!==row) row.appendChild(btn);
-  row.style.cssText='display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:8px;align-items:center';
-  modelSel.style.width='100%';
-  modelSel.style.minWidth='0';
-  modelSel.style.boxSizing='border-box';
- }
- if(!btn) return;
- btn.classList.add('model-advanced-btn');
- if(!btn.querySelector('svg')&&typeof li==='function') btn.innerHTML=li('settings',15);
- btn.style.position='';
- btn.style.right='';
- btn.style.top='';
- btn.style.transform='';
- btn.style.width='32px';
- btn.style.height='32px';
- btn.style.display='flex';
- btn.style.alignItems='center';
- btn.style.justifyContent='center';
- btn.style.flex='0 0 32px';
- btn.style.boxSizing='border-box';
- const title=t('settings_aux_advanced_button_title')||'Advanced options';
- btn.title=title;
- btn.setAttribute('aria-label',t('settings_main_advanced_button_aria')||'Advanced options for main model');
- btn.disabled=_mainAdvancedConfig===null;
- btn.style.opacity='';
- btn.style.cursor='';
- if(btn._bound) return;
- btn._bound=true;
- btn.addEventListener('click',()=>{if(_mainAdvancedConfig!==null)_openAuxAdvancedOptions('__main__',_mainAdvancedConfig||{});});
-}
 
 // Build the auxiliary picker provider list from /api/models groups.
 // A named custom provider whose /v1/models probe failed still reaches the UI as
@@ -12626,166 +12013,152 @@ function _auxProvidersFromModelGroups(groups){
  }));
 }
 
+
 async function _loadAuxiliaryModels(){
- const container=$('auxModelsContainer');
- if(!container) return;
- container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_loading')||'Loading…')+'</div>';
-
- try{
-  // Fetch auxiliary config AND the WebUI's own /api/models for provider/model lists
-  const [auxData,modelsData]=await Promise.all([
-   api('/api/model/auxiliary').catch(()=>null),
-   api('/api/models').catch(()=>null),
-  ]);
-  // Build provider list from /api/models groups
-  // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
-  const groups=(modelsData&&modelsData.groups)||[];
-  _auxProviders=_auxProvidersFromModelGroups(groups);
-  if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
-   _mainAdvancedConfig=auxData.main||{};
-  }else{
-   _mainAdvancedConfig=null;
+  const seq=++_auxLoadSeq;
+  const loadSeq=_settingsPanelLoadSeq;
+  const profileGeneration=typeof _profileSwitchGeneration==='number'?_profileSwitchGeneration:null;
+  const isCurrent=()=>seq===_auxLoadSeq&&loadSeq===_settingsPanelLoadSeq
+    &&(profileGeneration===null||profileGeneration===_profileSwitchGeneration);
+  window.settingsHost.setAuxiliaryStatus(true,'');
+  try{
+    const [auxData,modelsData]=await Promise.all([
+      api('/api/model/auxiliary'),
+      api('/api/models').catch(()=>null),
+    ]);
+    if(!isCurrent()) return;
+    if(!auxData||typeof auxData!=='object') throw new Error('Auxiliary model settings unavailable');
+    _auxProviders=_auxProvidersFromModelGroups((modelsData&&modelsData.groups)||[]);
+    _mainAdvancedConfig=Object.prototype.hasOwnProperty.call(auxData,'main')?auxData.main||{}:null;
+    _auxTasks=_normalizeAuxiliaryTasks(auxData.tasks||[]);
+    const taskMap=Object.fromEntries(_auxTasks.map(task=>[task.task,task]));
+    _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
+    const providers=_auxProviders.map(provider=>({
+      value:provider.slug,
+      label:provider.name,
+      models:provider.models.map(model=>({
+        value:_modelBareNameForProvider(model.id,provider.slug)||model.id,
+        label:model.label,
+      })),
+      ...(provider.modelsEndpointError?{modelsError:provider.modelsEndpointError.message||'Models endpoint could not be reached for this provider.'}:{}),
+    }));
+    let needsCanonicalSave=false;
+    const rows=_auxTasks.map(task=>{
+      const cfg=taskMap[task.task]||{provider:'auto',model:''};
+      const provider=cfg.provider||'auto';
+      const canonicalModel=_modelBareNameForProvider(cfg.model,provider)||'';
+      if(canonicalModel!==cfg.model) needsCanonicalSave=true;
+      const providerData=_auxProviders.find(item=>item.slug===provider);
+      return {
+        task:task.task,
+        label:task.label||task.task,
+        description:task.description||'',
+        provider,
+        model:canonicalModel,
+        providers,
+        ...(!providerData&&provider!=='auto'?{configuredProvider:{value:provider,label:provider}}:{}),
+        ...(providerData&&providerData.modelsEndpointError?{modelsError:providerData.modelsEndpointError.message||'Models endpoint could not be reached for this provider.'}:{}),
+      };
+    });
+    window.settingsHost.setAuxiliaryModels(rows);
+    const current=window.settingsHost.getSnapshot();
+    window.settingsHost.setSnapshot({...current,auxiliaryDirty:needsCanonicalSave});
+    window.settingsHost.setAuxiliaryStatus(false,'');
+  }catch(error){
+    if(!isCurrent()) return;
+    console.warn('[settings] auxiliary models load failed',error);
+    window.settingsHost.setAuxiliaryModels([]);
+    window.settingsHost.setAuxiliaryStatus(false,t('settings_aux_load_failed')||'Could not load auxiliary model settings. Make sure the agent API is available.');
   }
-  _bindMainAdvancedOptionsButton();
-  _auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[]);
-  // Build a quick lookup: taskKey → config
-  const taskMap={};
-  for(const task of _auxTasks) taskMap[task.task]=task;
-  _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
-
-  container.innerHTML='';
-  let needsCanonicalSave=false;
-  for(const task of _auxTasks){
-   const cfg=taskMap[task.task]||{provider:'auto',model:''};
-   const row=document.createElement('div');
-   row.style.cssText='display:grid;grid-template-columns:120px 1fr 1fr 34px;gap:8px;align-items:center;margin-bottom:8px';
-
-   // Task name + description
-   const label=document.createElement('div');
-   label.style.cssText='font-size:12px;font-weight:500;color:var(--text);line-height:1.3';
-   label.innerHTML=esc(task.label||task.task)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(task.description||'')+'</div>';
-   row.appendChild(label);
-
-   // Provider select
-   const provSel=document.createElement('select');
-   provSel.id='aux-prov-'+task.task;
-   provSel.style.cssText=_auxSelectStyle();
-   _buildAuxProviderOptions(provSel,_auxProviders,cfg.provider);
-   provSel.addEventListener('change',()=>_onAuxProviderChange(task.task,_auxProviders));
-   row.appendChild(provSel);
-
-   // Model select
-   const modelSel=document.createElement('select');
-   modelSel.id='aux-model-'+task.task;
-   modelSel.style.cssText=_auxSelectStyle();
-   const canonicalModel=_buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
-   if(canonicalModel!==cfg.model) needsCanonicalSave=true;
-   modelSel.addEventListener('change',()=>_onAuxModelChange(task.task));
-   row.appendChild(modelSel);
-
-   const advancedBtn=document.createElement('button');
-   advancedBtn.type='button';
-   advancedBtn.className='aux-advanced-btn model-advanced-btn';
-   const advTitle=t('settings_aux_advanced_button_title')||'Advanced options';
-   const taskName=task.label||task.task;
-   advancedBtn.title=advTitle;
-   advancedBtn.setAttribute('aria-label',(t('settings_aux_advanced_button_aria')||'Advanced options for {task}').replace('{task}',taskName));
-   advancedBtn.innerHTML=typeof li==='function'?li('settings',15):'⚙';
-   advancedBtn.addEventListener('click',()=>_openAuxAdvancedOptions(task,cfg));
-   row.appendChild(advancedBtn);
-
-   container.appendChild(row);
-  }
-  // Matching legacy @provider:model values can be repaired with one explicit Apply.
-  const applyBtn=$('btnApplyAuxModels');
-  if(applyBtn) applyBtn.style.display=needsCanonicalSave?'':'none';
-
-  // Reset button
-  const resetBtn=$('btnResetAuxModels');
-  if(resetBtn&&!resetBtn._bound){
-   resetBtn._bound=true;
-   resetBtn.addEventListener('click',async()=>{
-    if(!(await showConfirmDialog({title:t('settings_aux_reset_confirm_title')||'Reset auxiliary models?',message:t('settings_aux_reset_confirm_msg')||'This will set all auxiliary tasks to auto (use main model).',confirmLabel:t('settings_btn_reset_aux_models')||'Reset',danger:true}))) return;
-    try{
-     await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:'__reset__',provider:'auto',model:''})});
-     if(typeof showToast==='function') showToast(t('settings_aux_reset_done')||'Auxiliary models reset to auto');
-     _loadAuxiliaryModels();
-    }catch(e){
-     if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to reset auxiliary models');
-    }
-   });
-  }
-
-  // Apply button
-  if(applyBtn&&!applyBtn._bound){
-   applyBtn._bound=true;
-   applyBtn.addEventListener('click',_applyAuxModels);
-  }
- }catch(e){
-  console.warn('[settings] auxiliary models load failed',e);
-  container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_load_failed')||'Could not load auxiliary model settings. Make sure the agent API is available.')+'</div>';
- }
 }
 
-async function _applyAuxModels(){
+async function _applyAuxModels(rows){
  let saved=0;
  for(const task of _auxTasks){
+  const row=Array.isArray(rows)?rows.find(item=>item.task===task.task):null;
   const provSel=$('aux-prov-'+task.task);
   const modelSel=$('aux-model-'+task.task);
-  if(!provSel) continue;
-  const provider=provSel.value;
-  const model=(modelSel&&modelSel.value!=='__custom__')?(modelSel.value||''):'';
+  if(!row&&!provSel) continue;
+  const provider=row?row.provider:provSel.value;
+  const model=row?String(row.model||''):(modelSel&&modelSel.value!=='__custom__'?(modelSel.value||''):'');
   const orig=_auxOriginalConfig?.[task.task]||{provider:'auto',model:''};
-  // Only save if changed
-  if(provider!==orig.provider||model!==orig.model){
+  const originalModel=_modelBareNameForProvider(orig.model,orig.provider)||'';
+  if(provider!==orig.provider||model!==originalModel){
    try{
     await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:task.task,provider,model})});
     saved++;
    }catch(e){
     console.warn('[settings] failed to save aux task',task.task,e);
-    // Surface the server's actionable message (e.g. an ambiguous custom-provider
-    // slug collision: rename one provider so its slug is unique) instead of a
-    // generic failure, and abort the loop so the dirty selection is retained for
-    // the user to fix and retry — the reload that would clear it is skipped.
-    const _msg=(e&&e.message)?e.message:'';
-    const _base=t('settings_aux_save_failed')||'Failed to save auxiliary model';
-    if(typeof showToast==='function') showToast(_msg?(_base+': '+_msg):_base,6000,'error');
+    const message=e&&e.message?e.message:'';
+    const base=t('settings_aux_save_failed')||'Failed to save auxiliary model';
+    if(typeof showToast==='function') showToast(message?(base+': '+message):base,6000,'error');
     return;
    }
   }
  }
  if(typeof showToast==='function') showToast(saved?(t('settings_aux_saved')||'Auxiliary models updated'):(t('settings_aux_no_changes')||'No changes to apply'));
- // Reload to refresh state
  _loadAuxiliaryModels();
 }
 
 async function saveSettings(andClose){
-  const model=($('settingsModel')||{}).value;
-  const modelState=(typeof _captureModelDropdownSelection==='function'&&$('settingsModel'))
-    ? (_captureModelDropdownSelection($('settingsModel'))||{model:String(model||''),model_provider:null})
-    : {model:String(model||''),model_provider:null};
-  const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'')||((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null));
-  const sendKey=($('settingsSendKey')||{}).value;
-  const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
-  const showQuotaChip=!!($('settingsShowQuotaChip')||{}).checked;
-  const showConversationOutline=!!($('settingsShowConversationOutline')||{}).checked;
-  const showTps=!!($('settingsShowTps')||{}).checked;
-  const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
-  const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
-  const showClaudeCodeSessions=!!($('settingsShowClaudeCodeSessions')||{}).checked;
-  const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
-  const showWebhookSessions=!!($('settingsShowWebhookSessions')||{}).checked;
-  const showKanbanSessions=!!($('settingsShowKanbanSessions')||{}).checked;
-  const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
-  const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
+  const modelSelect=$('settingsModel');
+  if(!window.settingsHost||!modelSelect||!window.settingsHost.getSnapshot().loaded){
+    const pwField=$('settingsPassword');
+    const pw=String(pwField&&pwField.value||'').trim();
+    if(!pw){showToast(t('settings_load_failed')+'Appearance and Preferences are not ready.');return;}
+    const currentPwField=$('settingsCurrentPassword');
+    const currentPw=String(currentPwField&&currentPwField.value||'');
+    if(_settingsPasswordAuthEnabled&&!currentPw.trim()){
+      if(currentPwField) currentPwField.focus();
+      showToast(t('current_password_required'));
+      return;
+    }
+    const payload={_set_password:pw};
+    if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
+    try{
+      const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+      if(pwField) pwField.value='';
+      if(currentPwField) currentPwField.value='';
+      _settingsPasswordAuthEnabled=!!saved.password_auth_enabled;
+      _updateCurrentPasswordVisibility();
+      showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
+      return;
+    }catch(error){showToast(t('settings_save_failed')+error.message);return;}
+  }
+  const state=window.settingsHost.getSnapshot();
+  const appearance=state.appearance;
+  const preferences=state.preferences;
+  const value=id=>preferences[id]??appearance[id];
+  const checked=id=>!!value(id);
+  const model=String(preferences.settingsModel||'');
+  let modelProvider=String(preferences.settingsModelProvider||'')||null;
+  if(model&&!modelProvider){
+    const matching=state.preferencesOptions.models.filter(option=>(option.model||option.value)===model);
+    if(matching.length===1) modelProvider=matching[0].provider||null;
+  }
+  const modelState={model,model_provider:modelProvider};
+  const modelChanged=model!==(_settingsHermesDefaultModelOnOpen||'')||((modelProvider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null));
+  const sendKey=value('settingsSendKey');
+  const showTokenUsage=checked('settingsShowTokenUsage');
+  const showQuotaChip=checked('settingsShowQuotaChip');
+  const showConversationOutline=checked('settingsShowConversationOutline');
+  const showTps=checked('settingsShowTps');
+  const fadeTextEffect=checked('settingsFadeTextEffect');
+  const showCliSessions=checked('settingsShowCliSessions');
+  const showClaudeCodeSessions=checked('settingsShowClaudeCodeSessions');
+  const showCronSessions=checked('settingsShowCronSessions');
+  const showWebhookSessions=checked('settingsShowWebhookSessions');
+  const showKanbanSessions=checked('settingsShowKanbanSessions');
+  const showPreviousMessagingSessions=checked('settingsShowPreviousMessagingSessions');
+  const pinnedSessionsLimit=parseInt(value('settingsPinnedSessionsLimit'),10)||3;
   const pw=($('settingsPassword')||{}).value;
-  const theme=($('settingsTheme')||{}).value||'dark';
-  const skin=($('settingsSkin')||{}).value||'default';
-  const fontSize=($('settingsFontSize')||{}).value||localStorage.getItem('hermes-font-size')||'default';
-  const language=($('settingsLanguage')||{}).value||'en';
-  const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
-  const defaultMessageMode=($('settingsDefaultMessageMode')||{}).value||'steer';
-  const showBusyPlaceholderHint=!!($('settingsShowBusyPlaceholderHint')||{}).checked;
+  const theme=value('settingsTheme')||'dark';
+  const skin=value('settingsSkin')||'default';
+  const fontSize=value('settingsFontSize')||localStorage.getItem('hermes-font-size')||'default';
+  const language=value('settingsLanguage')||'en';
+  const sidebarDensity=value('settingsSidebarDensity')==='detailed'?'detailed':'compact';
+  const defaultMessageMode=value('settingsDefaultMessageMode')||'steer';
+  const showBusyPlaceholderHint=checked('settingsShowBusyPlaceholderHint');
   const body={};
   Object.assign(body,_speechPreferencesPayloadFromUi());
 
@@ -12793,60 +12166,49 @@ async function saveSettings(andClose){
   body.theme=theme;
   body.skin=skin;
   body.font_size=fontSize;
-  body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
-  body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
-  body.chat_activity_display_mode=((($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')
-    ||(($('settingsChatActivityDisplayMode')||{}).value==='hide_all_activity'))
-    ? ($('settingsChatActivityDisplayMode')||{}).value
-    : 'compact_worklog';
-  body.transparent_stream_event_timestamps=(($('settingsTransparentEventTimestamps')||{}).checked)!==false;
-  body.auto_scroll_follow=!!($('settingsAutoScrollFollow')||{}).checked;
-  body.render_user_markdown=!!($('settingsRenderUserMarkdown')||{}).checked;
-  body.large_text_paste_as_attachment=!!($('settingsLargeTextPasteAsAttachment')||{}).checked;
-  body.project_quick_create_buttons=!!($('settingsProjectQuickCreate')||{}).checked;
+  body.session_jump_buttons=checked('settingsSessionJumpButtons');
+  body.session_endless_scroll=checked('settingsSessionEndlessScroll');
+  const activityMode=value('settingsChatActivityDisplayMode');
+  body.chat_activity_display_mode=activityMode==='transparent_stream'||activityMode==='hide_all_activity'?activityMode:'compact_worklog';
+  body.transparent_stream_event_timestamps=checked('settingsTransparentEventTimestamps');
+  body.auto_scroll_follow=checked('settingsAutoScrollFollow');
+  body.render_user_markdown=checked('settingsRenderUserMarkdown');
+  body.large_text_paste_as_attachment=checked('settingsLargeTextPasteAsAttachment');
+  body.project_quick_create_buttons=checked('settingsProjectQuickCreate');
   Object.assign(body,_structuredCodeViewFromUi());
   Object.assign(body,_composerControlVisibilityPayload());
   body.composer_control_order=_getComposerControlOrder();
   body.language=language;
   body.show_token_usage=showTokenUsage;
-  const maxTokensField=$('settingsMaxTokens');
-  if(maxTokensField){
-    const maxTokensRaw=String(maxTokensField.value||'').trim();
-    const initialMaxTokens=String(maxTokensField.dataset.initialValue||'').trim();
-    if(maxTokensRaw!==initialMaxTokens){
-      body.max_tokens=maxTokensRaw===''?null:maxTokensRaw;
-    }
-  }
+  const maxTokensRaw=String(preferences.settingsMaxTokens||'').trim();
+  const initialMaxTokens=String(state.baselines.maxTokens||'').trim();
+  if(maxTokensRaw!==initialMaxTokens) body.max_tokens=maxTokensRaw===''?null:maxTokensRaw;
   body.show_quota_chip=showQuotaChip===true;
   body.show_conversation_outline=showConversationOutline===true;
   body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
-  body.fade_text_effect=fadeTextEffect;
-  body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
-  body.workspace_todos_tab=!!window._workspaceTodosTab;
-  body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
+  body.terminal_auto_expand_on_output=checked('settingsTerminalAutoExpand');
+  body.workspace_todos_tab=checked('settingsWorkspaceTodosTab');
+  body.api_redact_enabled=checked('settingsApiRedact');
   body.show_cli_sessions=showCliSessions;
-  // Persist the opt-out child independently; the read path applies the parent gate.
   body.show_claude_code_sessions=showClaudeCodeSessions;
-  // Cron and webhook sessions are gated on CLI sessions (server short-circuits otherwise);
-  // mirror the autosave path so the explicit Save Settings button persists them too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;
   body.show_webhook_sessions=showCliSessions&&showWebhookSessions;
   body.show_kanban_sessions=showCliSessions&&showKanbanSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
-  body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
-  body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
-  body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;
-  body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
-  body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
-  body.rtl=!!($('settingsRtl')||{}).checked;
-  body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
+  body.sync_to_insights=checked('settingsSyncInsights');
+  body.check_for_updates=checked('settingsCheckUpdates');
+  body.ignore_agent_updates=checked('settingsIgnoreAgentUpdates');
+  body.whats_new_summary_enabled=checked('settingsWhatsNewSummary');
+  body.sound_enabled=checked('settingsSoundEnabled');
+  body.rtl=checked('settingsRtl');
+  body.notifications_enabled=checked('settingsNotificationsEnabled');
   body.show_thinking=window._showThinking!==false;
   body.sidebar_density=sidebarDensity;
   body.default_message_mode=defaultMessageMode;
-  body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
-  const botName=(($('settingsBotName')||{}).value||'').trim();
+  body.auto_title_refresh_every=String(value('settingsAutoTitleRefresh')||'0');
+  const botName=String(value('settingsBotName')||'').trim();
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
@@ -13498,31 +12860,203 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 
 
 function updateNotificationPermissionStatus(){
-  const el=$('notificationPermissionStatus');
-  const btn=$('notificationPermissionButton');
-  const btnWrap=$('notificationPermissionButtonWrap');
-  if(!el) return;
-  if(!('Notification' in window)){
-    const unsupported=t('notifications_unsupported');
-    el.textContent=unsupported;
-    if(btn){
-      btn.disabled=true;
-      btn.title='';
-      btn.setAttribute('aria-label', unsupported);
-      btn.setAttribute('aria-disabled','true');
-    }
-    if(btnWrap) btnWrap.title=unsupported;
+  const supported='Notification' in window;
+  const permission=supported?(Notification.permission||'default'):'unsupported';
+  const status=supported?t('notifications_permission_status',permission):t('notifications_unsupported');
+  window.settingsHost.setNotificationPermission({
+    status,
+    supported,
+    granted:supported&&permission==='granted',
+  });
+}
+window.addEventListener('hermes-settings:mark-speech-preference-changed',event=>{
+  const key=event.detail&&event.detail.key;
+  if(!_SETTINGS_SPEECH_STORAGE_KEYS[key]) return;
+  _markSpeechPreferenceChanged(key);
+  const current=window.settingsHost.getSnapshot();
+  window.settingsHost.setSnapshot({...current,speechOwned:[...new Set([...current.speechOwned,key])]});
+});
+let _settingsBotNameTimer=null;
+window.addEventListener('hermes-settings:retry-load',()=>loadSettingsPanel());
+window.addEventListener('hermes-settings:save-update-channel',event=>_saveUpdateChannel(event.detail&&event.detail.value));
+window.addEventListener('hermes-settings:changed',event=>{
+  const {pane,sourcePane,payload}=event.detail||{};
+  if(!payload||typeof payload!=='object') return;
+  const keys=Object.keys(payload);
+  for(const [id,value] of Object.entries(event.detail&&event.detail.fields||{})) _recordSettingsReactEdit(sourcePane,id,value);
+  if(pane==='preferences'&&keys.length===1&&keys[0]==='update_channel'){
+    _saveUpdateChannel(payload.update_channel);
     return;
   }
-  const perm=Notification.permission||'default';
-  const label=t('notifications_permission_status', perm);
-  el.textContent=label;
-  if(btn){
-    const granted=perm==='granted';
-    btn.disabled=granted;
-    btn.title=granted?'':label;
-    btn.setAttribute('aria-label', label);
-    btn.setAttribute('aria-disabled', granted?'true':'false');
+  if(sourcePane==='appearance'&&(
+    Array.isArray(payload.hidden_tabs)||Array.isArray(payload.tab_order)||Array.isArray(payload.composer_control_order)
+  )){
+    _settingsReactOptionEdit={options:window.settingsHost.getSnapshot().appearanceOptions,seq:++_settingsReactEditSeq,generation:_profileSwitchGeneration};
   }
-  if(btnWrap) btnWrap.title=label;
-}
+  if(sourcePane==='appearance'){
+    if(Array.isArray(payload.hidden_tabs)){
+      _setHiddenTabs(payload.hidden_tabs);
+      _applyTabVisibility(payload.hidden_tabs);
+    }
+    if(Array.isArray(payload.tab_order)){
+      _setTabOrder(payload.tab_order);
+      _applyTabOrder(payload.tab_order);
+    }
+    if(Array.isArray(payload.composer_control_order)){
+      const order=_setComposerControlOrder(payload.composer_control_order);
+      if(typeof window._applyComposerControlOrder==='function') window._applyComposerControlOrder(order);
+    }
+    const composerKeys=new Set(_composerControlDefsForSettings().map(def=>def.key));
+    for(const [key,value] of Object.entries(payload)){
+      if(composerKeys.has(key)){
+        if(!window._composerControlVisibility) window._composerControlVisibility={};
+        window._composerControlVisibility[key]=!value;
+      }
+    }
+    if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
+  }
+  if(pane==='preferences'){
+    if(typeof payload.language==='string'){
+      if(typeof setLocale==='function') setLocale(payload.language);
+      if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+    }
+    const speechKeys={
+      tts_enabled:'tts_enabled',tts_auto_read:'tts_auto_read',tts_engine:'tts_engine',tts_voice:'tts_voice',
+      tts_rate:'tts_rate',tts_pitch:'tts_pitch',voice_mode_button:'voice_mode_button',
+      raw_audio_mode:'raw_audio_mode',voice_continuous:'voice_continuous',
+    };
+    for(const [payloadKey,speechKey] of Object.entries(speechKeys)){
+      if(Object.prototype.hasOwnProperty.call(payload,payloadKey)){
+        _markSpeechPreferenceChanged(speechKey);
+        _syncSpeechPreferenceCache(speechKey,payload[payloadKey]);
+      }
+    }
+    if(Object.prototype.hasOwnProperty.call(payload,'tts_engine')&&typeof window._populateTtsVoices==='function'){
+      window._populateTtsVoices();
+    }
+    if(Object.prototype.hasOwnProperty.call(payload,'workspace_todos_tab')){
+      window._workspaceTodosTab=!!payload.workspace_todos_tab;
+      _applyWorkspaceTodosTabVisibility();
+    }
+  }
+  if(pane==='appearance'){
+    if(Object.prototype.hasOwnProperty.call(payload,'session_jump_buttons')) window._sessionJumpButtonsEnabled=!!payload.session_jump_buttons;
+    if(Object.prototype.hasOwnProperty.call(payload,'session_endless_scroll')) window._sessionEndlessScrollEnabled=!!payload.session_endless_scroll;
+    if(Object.prototype.hasOwnProperty.call(payload,'auto_scroll_follow')){window._autoScrollFollow=!!payload.auto_scroll_follow;if(typeof _persistAutoScrollFollow==='function') _persistAutoScrollFollow(window._autoScrollFollow);}
+    if(Object.prototype.hasOwnProperty.call(payload,'render_user_markdown')){window._renderUserMarkdown=!!payload.render_user_markdown;if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();if(typeof renderMessages==='function') renderMessages();}
+    if(Object.prototype.hasOwnProperty.call(payload,'large_text_paste_as_attachment')) window._largeTextPasteAsAttachment=!!payload.large_text_paste_as_attachment;
+    if(Object.prototype.hasOwnProperty.call(payload,'project_quick_create_buttons')){window._projectQuickCreate=!!payload.project_quick_create_buttons;if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();}
+    if(Object.prototype.hasOwnProperty.call(payload,'structured_code_default_view')||Object.prototype.hasOwnProperty.call(payload,'structured_code_auto_tree_lines')){
+      const cfg=_structuredCodeViewFromUi();_applyStructuredCodeViewSettings(cfg.structured_code_default_view,cfg.structured_code_auto_tree_lines,cfg.structured_code_default_view==='auto');
+    }
+    if(Object.prototype.hasOwnProperty.call(payload,'worklog_details_expanded_default')){window._worklogDetailsExpandedByDefault=!!payload.worklog_details_expanded_default;if(typeof _applyWorklogDetailsExpandedDefault==='function') _applyWorklogDetailsExpandedDefault();}
+    if(Object.prototype.hasOwnProperty.call(payload,'chat_activity_display_mode')){
+      _syncChatActivityDisplayModeControl(payload.chat_activity_display_mode);
+      if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+      if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+    }
+    if(Object.prototype.hasOwnProperty.call(payload,'transparent_stream_event_timestamps')){
+      _syncTransparentEventTimestampsControl(payload.transparent_stream_event_timestamps);
+      if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+      if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+    }
+    if(Object.prototype.hasOwnProperty.call(payload,'hide_empty_state_suggestions')){window._hideEmptyStateSuggestions=!!payload.hide_empty_state_suggestions;if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();}
+    if(Object.prototype.hasOwnProperty.call(payload,'hide_empty_state_panel')){window._hideEmptyStatePanel=!!payload.hide_empty_state_panel;if(typeof applyEmptyStatePanelPref==='function') applyEmptyStatePanelPref();}
+    if(Object.prototype.hasOwnProperty.call(payload,'virtualize_transcript')){window._virtualizeTranscript=!!payload.virtualize_transcript;if(typeof renderMessages==='function') renderMessages({preserveScroll:true});}
+    if(Object.prototype.hasOwnProperty.call(payload,'show_conversation_outline')){window._showConversationOutline=!!payload.show_conversation_outline;document.documentElement.dataset.conversationOutline=window._showConversationOutline?'enabled':'disabled';if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();}
+    if(Object.prototype.hasOwnProperty.call(payload,'show_tps')){window._showTps=!!payload.show_tps;if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();if(typeof renderMessages==='function') renderMessages();}
+    if(Object.prototype.hasOwnProperty.call(payload,'fade_text_effect')) window._fadeTextEffect=!!payload.fade_text_effect;
+    if(Object.prototype.hasOwnProperty.call(payload,'rtl')){const on=!!payload.rtl;try{localStorage.setItem('hermes-rtl',on?'true':'false');}catch(_){}document.documentElement.classList.toggle('chat-content-rtl',on);}
+    if(Object.prototype.hasOwnProperty.call(payload,'terminal_auto_expand_on_output')) window._terminalAutoExpandOnOutput=!!payload.terminal_auto_expand_on_output;
+    if(Object.prototype.hasOwnProperty.call(payload,'pinned_sessions_limit')) window._pinnedSessionsLimit=parseInt(payload.pinned_sessions_limit,10)||3;
+    if(Object.prototype.hasOwnProperty.call(payload,'default_message_mode')){window._defaultMessageMode=typeof _persistDefaultMessageMode==='function'?_persistDefaultMessageMode(payload.default_message_mode):payload.default_message_mode;if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();}
+    if(Object.prototype.hasOwnProperty.call(payload,'show_busy_placeholder_hint')){window._showBusyPlaceholderHint=!!payload.show_busy_placeholder_hint;if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();}
+    if(Object.prototype.hasOwnProperty.call(payload,'new_chat_on_workspace_switch')) window._newChatOnWorkspaceSwitch=!!payload.new_chat_on_workspace_switch;
+  }
+  if(pane==='appearance') _scheduleAppearanceAutosave();
+  else if(pane==='preferences'){
+    const keys=Object.keys(payload);
+    if(keys.length===1&&keys[0]==='update_channel') return;
+    if(keys.length===1&&keys[0]==='bot_name'){
+      clearTimeout(_settingsBotNameTimer);
+      _settingsBotNameTimer=setTimeout(()=>_schedulePreferencesAutosave(),500);
+    }else _schedulePreferencesAutosave();
+  }
+});
+window.addEventListener('hermes-settings:manual-dirty',event=>{
+  const {kind,dirty,detail}=event.detail||{};
+  if(kind==='model'){
+    _settingsModelEditSeq++;
+    if(detail&&typeof detail.model==='string'){
+      _recordSettingsReactEdit('preferences','settingsModel',detail.model);
+      _recordSettingsReactEdit('preferences','settingsModelProvider',detail.provider||'');
+    }
+  }
+  if(kind==='maxTokens'&&typeof detail==='string') _recordSettingsReactEdit('preferences','settingsMaxTokens',detail);
+  if(kind==='aux'){
+    _settingsReactAuxEdit={rows:detail,seq:++_settingsReactEditSeq,generation:_profileSwitchGeneration};
+    if(dirty) _markAuxDirty();
+    else _markAuxClean();
+  }else if(dirty) _markSettingsDirty();
+});
+window.addEventListener('hermes-settings:retry-autosave',event=>{
+  if(event.detail&&event.detail.pane==='appearance') _retryAppearanceAutosave();
+  else _retryPreferencesAutosave();
+});
+window.addEventListener('hermes-settings:pick-activity-mode',event=>_pickChatActivityDisplayMode(event.detail.value));
+window.addEventListener('hermes-settings:pick-theme',event=>_recordSettingsReactEdit('appearance','settingsTheme',event.detail.value));
+window.addEventListener('hermes-settings:pick-skin',event=>_recordSettingsReactEdit('appearance','settingsSkin',event.detail.value));
+window.addEventListener('hermes-settings:pick-font-size',event=>_recordSettingsReactEdit('appearance','settingsFontSize',event.detail.value));
+window.addEventListener('hermes-settings:pick-activity-mode',event=>_recordSettingsReactEdit('appearance','settingsChatActivityDisplayMode',event.detail.value));
+window.addEventListener('hermes-settings:pick-timestamps',event=>_recordSettingsReactEdit('appearance','settingsTransparentEventTimestamps',event.detail.value));
+window.addEventListener('hermes-settings:pick-timestamps',event=>_pickTransparentEventTimestamps(event.detail.value));
+window.addEventListener('hermes-settings:select-model',()=>_markSettingsDirty());
+window.addEventListener('hermes-settings:workspace-panel-open',event=>{
+  const open=!!(event.detail&&event.detail.open);
+  _recordSettingsReactEdit('appearance','settingsWorkspacePanelOpen',open);
+  localStorage.setItem('hermes-webui-workspace-panel-pref',open?'open':'closed');
+  localStorage.setItem('hermes-webui-workspace-panel',open?'open':'closed');
+  document.documentElement.dataset.workspacePanel=open?'open':'closed';
+  if(open&&_workspacePanelMode==='closed') openWorkspacePanel('browse');
+  else if(!open&&_workspacePanelMode!=='closed') toggleWorkspacePanel(false);
+});
+window.addEventListener('hermes-settings:notification-permission',()=>requestNotificationPermission());
+window.addEventListener('hermes-settings:test-notification',()=>sendBrowserNotification('Hermes test','Notifications are ready.',{force:true}));
+window.addEventListener('hermes-settings:open-advanced-model',event=>{
+  const task=event.detail&&event.detail.task;
+  if(task===null||task===undefined) _openAuxAdvancedOptions('__main__',_mainAdvancedConfig||{});
+  else {
+    const config=_auxTasks.find(item=>item.task===task);
+    if(config) _openAuxAdvancedOptions(config,config);
+  }
+});
+window.addEventListener('hermes-settings:apply-aux-models',async event=>{
+  try{await _applyAuxModels(event.detail&&event.detail.rows);event.detail.resolve();}
+  catch(error){event.detail.reject(error);}
+});
+window.addEventListener('hermes-settings:load-aux-models',()=>_loadAuxiliaryModels());
+window.addEventListener('hermes-settings:reset-aux-models',async event=>{
+  const {resolve,reject}=event.detail;
+  try{
+    if(!(await showConfirmDialog({title:t('settings_aux_reset_confirm_title')||'Reset auxiliary models?',message:t('settings_aux_reset_confirm_msg')||'This will set all auxiliary tasks to auto (use main model).',confirmLabel:t('settings_btn_reset_aux_models')||'Reset',danger:true}))){
+      resolve();
+      return;
+    }
+    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:'__reset__',provider:'auto',model:''})});
+    if(typeof showToast==='function') showToast(t('settings_aux_reset_done')||'Auxiliary models reset to auto');
+    await _loadAuxiliaryModels();
+    resolve();
+  }catch(error){
+    if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to reset auxiliary models');
+    reject(error);
+  }
+});
+window.addEventListener('hermes-settings:prompt-custom-aux-model',async event=>{
+  const {task,resolve,reject}=event.detail;
+  try{
+    const custom=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
+    const provider=_auxTasks.find(item=>item.task===task)?.provider||'';
+    resolve(custom&&custom.trim()?(_modelBareNameForProvider(custom.trim(),provider)||custom.trim()):null);
+  }catch(error){reject(error);}
+});
+window.addEventListener('hermes-settings:toggle-dashboard-visibility',()=>_toggleDashboardVisibilityChip());

@@ -14,9 +14,22 @@ purely backend changes, use the runtime/state contracts instead.
 ## Product shape
 
 Hermes WebUI is a browser workbench for Hermes Agent with near-CLI parity.
-Python serves the application. Most screens use vanilla JavaScript; Library uses
-React and shadcn/ui with prebuilt, scoped assets. See
-[`Shared Library`](shared-library.md#develop-the-react-interface) for its build workflow.
+Python serves the application. Most screens use vanilla JavaScript; Library and
+the Appearance and Preferences settings panes use React and shadcn/ui with
+prebuilt, scoped assets. See
+[`Shared Library`](shared-library.md#develop-the-react-interface) for the shared build workflow.
+
+The settings panes live in `frontend/settings/SettingsPanes.tsx`. Their controlled
+state comes from `static/settings-host.js`; saved values must be mapped directly
+into that state, never recovered from React-owned input elements after rendering.
+Controls stay unavailable while their profile settings load. Profile changes
+invalidate pending loads and autosaves before loading the new profile.
+
+Appearance and ordinary Preferences changes retain autosave. Default-model and
+max-token changes retain explicit Save and the existing leave/save/discard guard.
+The update channel uses its dedicated writer and reverts the displayed state on
+failure. Conversation, Providers, Plugins, Extensions, System, and Help remain
+legacy-owned; do not mount React over those panes or autosave authentication fields.
 
 The primary layout is three-panel:
 

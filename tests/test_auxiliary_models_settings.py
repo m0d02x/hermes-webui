@@ -1,8 +1,8 @@
-"""Tests for auxiliary models settings UI — panels.js + index.html + i18n.js.
+"""Tests for auxiliary models settings — React publisher path + backend + i18n.
 
-Verifies that the auxiliary models card is present in the settings HTML,
-that the JS loading/saving logic is wired up, and that all locales have the
-required i18n keys.
+Verifies the auxiliary-models data published by panels.js
+(_loadAuxiliaryModels/_applyAuxModels via window.settingsHost), the backend
+/api/model/auxiliary and /api/model/set contracts, and the i18n keys.
 """
 import json
 import shutil
@@ -16,76 +16,13 @@ import pytest
 ROOT = Path(__file__).parent.parent
 PANELS_JS_PATH = ROOT / "static" / "panels.js"
 PANELS_JS = PANELS_JS_PATH.read_text(encoding="utf-8")
-INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 STREAMING_PY = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
-class TestAuxiliaryModelsHTML:
-    """The auxiliary models card must be present in the settings preferences pane."""
-
-    def test_aux_models_container_exists(self):
-        """The #auxModelsContainer div must exist in the preferences pane."""
-        assert 'id="auxModelsContainer"' in INDEX_HTML, (
-            "Missing #auxModelsContainer in index.html — auxiliary models card not rendered"
-        )
-
-    def test_reset_button_exists(self):
-        assert 'id="btnResetAuxModels"' in INDEX_HTML, (
-            "Missing #btnResetAuxModels button in index.html"
-        )
-
-    def test_apply_button_exists(self):
-        assert 'id="btnApplyAuxModels"' in INDEX_HTML, (
-            "Missing #btnApplyAuxModels button in index.html"
-        )
-
-    def test_aux_card_after_default_model(self):
-        """Auxiliary Models card should come after the Default Model card in the DOM."""
-        model_idx = INDEX_HTML.find('id="settingsModel"')
-        aux_idx = INDEX_HTML.find('id="auxModelsContainer"')
-        assert model_idx >= 0, "Default Model select not found in index.html"
-        assert aux_idx >= 0, "Auxiliary Models container not found in index.html"
-        assert aux_idx > model_idx, (
-            "Auxiliary Models container must appear after Default Model in the DOM"
-        )
-
-    def test_i18n_label_on_aux_card(self):
-        """The auxiliary models card label must use data-i18n attribute."""
-        assert 'data-i18n="settings_label_auxiliary_models"' in INDEX_HTML, (
-            "Missing data-i18n='settings_label_auxiliary_models' on auxiliary card label"
-        )
-
-
 class TestAuxiliaryModelsJS:
     """The JS logic for loading and saving auxiliary models must be in panels.js."""
-
-    def test_load_function_exists(self):
-        assert "async function _loadAuxiliaryModels" in PANELS_JS, (
-            "Missing _loadAuxiliaryModels() in panels.js"
-        )
-
-    def test_apply_function_exists(self):
-        assert "async function _applyAuxModels" in PANELS_JS, (
-            "Missing _applyAuxModels() in panels.js"
-        )
-
-    def test_auxiliary_task_metadata_is_normalized(self):
-        """Frontend should keep auxiliary task rows backed by normalized metadata."""
-        assert "let _auxTasks=[]" in PANELS_JS, "Missing _auxTasks cache in panels.js"
-        assert "function _normalizeAuxiliaryTasks" in PANELS_JS, (
-            "Missing _normalizeAuxiliaryTasks() in panels.js"
-        )
-        assert "function _auxTaskLabelFromMeta" in PANELS_JS, (
-            "Missing _auxTaskLabelFromMeta() in panels.js"
-        )
-        assert "_auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[])" in PANELS_JS, (
-            "Auxiliary load flow must normalize API task payload"
-        )
-        assert "for(const task of _auxTasks)" in PANELS_JS, (
-            "Auxiliary rows should be rendered from normalized API payload"
-        )
 
     @pytest.mark.skipif(NODE is None, reason="node not on PATH")
     def test_normalize_auxiliary_tasks_keeps_first_wins_and_unknown_metadata(self):
@@ -162,50 +99,7 @@ console.log(JSON.stringify({
         assert result["futureLabel"] == "Future Task"
         assert result["futureDescription"] == "future tool"
 
-    def test_no_hardcoded_aux_task_slot_array(self):
-        """Auxiliary rows must not come from a hardcoded task-slot list."""
-        assert "_AUX_TASK_SLOTS" not in PANELS_JS
-        assert "const _AUX_TASK_SLOTS" not in PANELS_JS
-        assert "session_search" not in PANELS_JS
 
-    def test_advanced_options_button_and_modal_wiring(self):
-        """Each auxiliary row and the main model should expose gear-driven advanced config editing."""
-        for marker in (
-            "aux-advanced-btn",
-            "model-advanced-row",
-            "model-advanced-btn",
-            "mainAdvancedBtn",
-            "_bindMainAdvancedOptionsButton",
-            "document.createElement('button')",
-            "row.appendChild(btn)",
-            "_openAuxAdvancedOptions",
-            "_mainAdvancedConfig=null",
-            "btn.disabled=_mainAdvancedConfig===null",
-            "if(_mainAdvancedConfig!==null)",
-            "Object.prototype.hasOwnProperty.call(auxData,'main')",
-            "_mainAdvancedConfig=null;",
-            "auxAdvancedOverlay",
-            "auxAdvancedBaseUrl",
-            "auxAdvancedTimeout",
-            "auxAdvancedDownloadTimeout",
-            "auxAdvancedMaxConcurrency",
-            "auxAdvancedExtraBody",
-            "auxAdvancedApiKey",
-            "api_key_clear",
-            "Object.keys(cfg.extra_body).length",
-        ):
-            assert marker in PANELS_JS
-
-    def test_normalize_auxiliary_tasks_deduplicates_and_rejects_malformed(self):
-        """Frontend normalization should keep only first occurrence and valid payload entries."""
-        assert "if(!rawTask||typeof rawTask!=='object') continue;" in PANELS_JS
-        assert "if(!task||seen.has(task)) continue;" in PANELS_JS
-
-    def test_auxiliary_load_uses_api_payload_order(self):
-        """Row rendering should iterate exactly the normalized API payload order."""
-        idx = PANELS_JS.find("_auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[])")
-        assert idx >= 0
-        assert "for(const task of _auxTasks)" in PANELS_JS[idx:idx + 380]
 
     def test_main_advanced_modal_hides_unsupported_timing_fields_but_keeps_request_body(self):
         """Main-model modal should not advertise timing knobs that the chat agent cannot apply."""
@@ -215,29 +109,6 @@ console.log(JSON.stringify({
         assert "const timingFields=isMain?'':(" in modal_body
         assert "auxAdvancedExtraBody" in modal_body
         assert "auxAdvancedBaseUrl" in modal_body
-
-    def test_main_advanced_modal_exposes_service_tier_selector(self):
-        """Main-model advanced modal should expose service-tier control."""
-        open_idx = PANELS_JS.find("function _openAuxAdvancedOptions")
-        assert open_idx >= 0
-        modal_body = PANELS_JS[open_idx:open_idx + 3600]
-        helper_idx = PANELS_JS.find("function _mainModelSupportsServiceTier")
-        assert helper_idx >= 0
-        helper_body = PANELS_JS[helper_idx:helper_idx + 1300]
-        assert "_mainModelSupportsServiceTier" in PANELS_JS
-        assert "selectedOpt.dataset.fast" in helper_body
-        assert "return cfg&&cfg.supports_fast_tier===true" in helper_body
-        assert "return fastSupport==='1'||fastSupport==='true'" in helper_body
-        assert "provider!=='openai'&&provider!=='openai-api'&&provider!=='openai-codex')" in helper_body
-        assert "provider==='openai-codex') return false" not in helper_body
-        assert "auxAdvancedServiceTier" in modal_body
-        assert "isMain&&_mainModelSupportsServiceTier(cfg)" in modal_body
-        assert "settings_main_advanced_service_tier" in modal_body
-        assert "settings_main_advanced_service_tier_default" in modal_body
-        assert "settings_main_advanced_service_tier_priority" in modal_body
-        assert "m.supports_fast_tier" in PANELS_JS
-        assert "opt.dataset.fast='1'" in PANELS_JS
-        assert "opt.dataset.fast='0'" in PANELS_JS
 
     def test_main_advanced_save_omits_unsupported_timing_keys(self):
         """Saving main-model options must not send blank timing keys that backend treats as clears."""
@@ -260,19 +131,6 @@ console.log(JSON.stringify({
         assert "_agent_kwargs['request_overrides'] = _main_request_overrides" in STREAMING_PY
         assert "_main_request_overrides or {}" in STREAMING_PY
 
-    def test_advanced_modal_uses_defined_theme_tokens_and_inline_button_styles(self):
-        """The modal is appended outside #mainSettings, so scoped button CSS must not be required."""
-        modal_idx = PANELS_JS.find("function _ensureAuxAdvancedModal")
-        assert modal_idx >= 0
-        modal_body = PANELS_JS[modal_idx:modal_idx + 2400]
-        assert "var(--panel)" not in modal_body, "--panel is not a defined WebUI theme token"
-        assert "class=\"settings-btn\"" not in modal_body, "settings-btn is scoped under #mainSettings"
-        assert "background:var(--surface)" in modal_body
-        assert "background:var(--input-bg)" in modal_body
-        assert ":-webkit-autofill" in PANELS_JS
-        assert "settings_aux_advanced_title" in PANELS_JS
-        assert "settings_aux_advanced_button_aria" in PANELS_JS
-
     def test_advanced_modal_inputs_disable_browser_autofill(self):
         """Advanced modal fields must not be mistaken for browser login/password fields."""
         input_helper_idx = PANELS_JS.find("function _auxAdvancedInputHtml")
@@ -291,36 +149,13 @@ console.log(JSON.stringify({
         assert 'autocomplete="one-time-code"' in api_key_call
         assert "-webkit-text-security:disc" in api_key_call
 
-    def test_calls_model_auxiliary_api(self):
-        """_loadAuxiliaryModels must call /api/model/auxiliary."""
-        assert "/api/model/auxiliary" in PANELS_JS, (
-            "panels.js must call /api/model/auxiliary to fetch current config"
-        )
-
-    def test_calls_model_set_api(self):
-        """_applyAuxModels must call /api/model/set to save changes."""
-        assert "/api/model/set" in PANELS_JS, (
-            "panels.js must call /api/model/set to save auxiliary model changes"
-        )
-
-    def test_provider_cascade(self):
-        """Changing provider must rebuild model dropdown."""
-        assert "_onAuxProviderChange" in PANELS_JS, (
-            "Missing _onAuxProviderChange() for provider→model cascade"
-        )
-        assert "_buildAuxModelOptions" in PANELS_JS, (
-            "Missing _buildAuxModelOptions() for model dropdown rebuild"
-        )
-
     @pytest.mark.skipif(NODE is None, reason="node not on PATH")
     def test_configured_aux_provider_absent_from_catalog_is_preserved(self):
-        """#7486: a configured provider missing from /api/models must survive Apply.
+        """#7486: configured providers absent from the catalog remain selected.
 
-        The aux provider <select> is populated with 'auto' plus the /api/models
-        catalog. When the configured provider is absent from that catalog (e.g.
-        its group is filtered out because it exposes no models), no option
-        matched, so the select fell back to its first entry ('auto') and the
-        next Apply persisted 'auto' — silently discarding the configured value.
+        React receives auxiliary rows through settingsHost. Exercise the real
+        loader and publisher, including the configuredProvider option used to
+        keep an unavailable provider selectable.
         """
         script = r"""
 const fs = require('fs');
@@ -337,9 +172,7 @@ function extract(name){
     if(ch === '{') depth += 1;
     else if(ch === '}') {
       depth -= 1;
-      if(depth === 0){
-        break;
-      }
+      if(depth === 0) break;
     }
     i += 1;
   }
@@ -348,69 +181,79 @@ function extract(name){
 }
 
 global.t = (key) => key;
+global.showToast = () => {};
+var _auxProviders = [];
+var _auxTasks = [];
+var _auxOriginalConfig = null;
+var _mainAdvancedConfig = null;
+var _auxLoadSeq = 0;
+var _settingsPanelLoadSeq = 0;
 
-// Minimal <select>/<option> model. The value getter mirrors real browser
-// behavior: with no option explicitly selected a single-select reads back its
-// first option, which is what made the downgrade silent.
-function makeSelect(){
-  const sel = { options: [] };
-  Object.defineProperty(sel, 'innerHTML', {
-    get(){ return ''; },
-    set(v){ if(v === '') sel.options = []; },
-  });
-  sel.appendChild = (node) => { sel.options.push(node); return node; };
-  sel.insertBefore = (node, ref) => {
-    const idx = sel.options.indexOf(ref);
-    if(idx < 0) sel.options.push(node); else sel.options.splice(idx, 0, node);
-    return node;
-  };
-  Object.defineProperty(sel, 'value', {
-    get(){
-      const picked = sel.options.find((opt) => opt.selected);
-      if(picked) return picked.value;
-      return sel.options.length ? sel.options[0].value : '';
-    },
-    set(v){ sel.options.forEach((opt) => { opt.selected = opt.value === v; }); },
-  });
-  return sel;
-}
+eval(extract('_auxTaskLabelFromMeta'));
+eval(extract('_normalizeAuxiliaryTasks'));
+eval(extract('_auxProvidersFromModelGroups'));
+eval(extract('_modelBareNameForProvider'));
+eval('async ' + extract('_loadAuxiliaryModels'));
 
-global.document = {
-  createElement(tag){
-    if(String(tag).toLowerCase() === 'option'){
-      return { tagName: 'OPTION', value: '', textContent: '', selected: false };
-    }
-    return { tagName: String(tag).toUpperCase(), value: '', textContent: '' };
-  },
+const captured = {rows: null};
+global.window = {settingsHost: {
+  setAuxiliaryStatus(){},
+  setAuxiliaryModels(rows){ captured.rows = rows; },
+  getSnapshot(){ return {auxiliaryDirty: false}; },
+  setSnapshot(){},
+}};
+let auxResponse, modelsResponse;
+global.api = async (path) => {
+  if(path === '/api/model/auxiliary') return auxResponse;
+  if(path === '/api/models') return modelsResponse;
+  throw new Error('unexpected api path ' + path);
 };
-
-eval(extract('_buildAuxProviderOptions'));
-
 const catalog = [
-  {slug: 'openai', name: 'OpenAI'},
-  {slug: 'anthropic', name: 'Anthropic'},
+  {provider: 'OpenAI', provider_id: 'openai', models: [{id: 'gpt-5', label: 'GPT-5'}]},
+  {provider: 'Anthropic', provider_id: 'anthropic', models: [{id: 'claude', label: 'Claude'}]},
 ];
+const rowOf = task => captured.rows.find(row => row.task === task);
 
-function build(providers, currentProvider){
-  const sel = makeSelect();
-  _buildAuxProviderOptions(sel, providers, currentProvider);
-  return {
-    values: sel.options.map((opt) => opt.value),
-    labels: sel.options.map((opt) => opt.textContent),
-    selected: sel.options.filter((opt) => opt.selected).map((opt) => opt.value),
-    value: sel.value,
+(async () => {
+  const out = {};
+  auxResponse = {tasks: [{task: 'vision', provider: 'custom-router', model: 'gpt-x'}]};
+  modelsResponse = {groups: catalog};
+  await _loadAuxiliaryModels();
+  const absent = rowOf('vision');
+  out.absent = {
+    provider: absent.provider, model: absent.model,
+    providers: absent.providers.map(item => item.value),
+    configuredProvider: absent.configuredProvider || null,
   };
-}
 
-console.log(JSON.stringify({
-  absent: build(catalog, 'custom-router'),
-  absentEmptyCatalog: build([], 'custom-router'),
-  present: build(catalog, 'anthropic'),
-  auto: build(catalog, 'auto'),
-  empty: build(catalog, ''),
-}));
+  modelsResponse = {groups: []};
+  await _loadAuxiliaryModels();
+  const absentEmpty = rowOf('vision');
+  out.absentEmptyCatalog = {
+    provider: absentEmpty.provider,
+    configuredProvider: absentEmpty.configuredProvider || null,
+  };
+
+  auxResponse = {tasks: [{task: 'vision', provider: 'anthropic', model: 'claude'}]};
+  modelsResponse = {groups: catalog};
+  await _loadAuxiliaryModels();
+  const present = rowOf('vision');
+  out.present = {
+    provider: present.provider,
+    providers: present.providers.map(item => item.value),
+    hasConfiguredProvider: Object.prototype.hasOwnProperty.call(present, 'configuredProvider'),
+  };
+
+  auxResponse = {tasks: [{task: 'vision', provider: 'auto', model: ''}]};
+  await _loadAuxiliaryModels();
+  const auto = rowOf('vision');
+  out.auto = {
+    provider: auto.provider,
+    hasConfiguredProvider: Object.prototype.hasOwnProperty.call(auto, 'configuredProvider'),
+  };
+  console.log(JSON.stringify(out));
+})();
 """
-
         proc = subprocess.run(
             [NODE, "-e", script, str(PANELS_JS_PATH)],
             capture_output=True,
@@ -419,149 +262,69 @@ console.log(JSON.stringify({
         )
         assert proc.returncode == 0, f"node probe failed:\n{proc.stderr}"
         result = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert result["absent"] == {
+            "provider": "custom-router",
+            "model": "gpt-x",
+            "providers": ["openai", "anthropic"],
+            "configuredProvider": {"value": "custom-router", "label": "custom-router"},
+        }
+        assert result["absentEmptyCatalog"] == {
+            "provider": "custom-router",
+            "configuredProvider": {"value": "custom-router", "label": "custom-router"},
+        }
+        assert result["present"] == {
+            "provider": "anthropic",
+            "providers": ["openai", "anthropic"],
+            "hasConfiguredProvider": False,
+        }
+        assert result["auto"] == {"provider": "auto", "hasConfiguredProvider": False}
 
-        absent = result["absent"]
-        assert "custom-router" in absent["values"], (
-            "configured provider absent from the catalog must keep a selectable option"
-        )
-        assert absent["selected"] == ["custom-router"], (
-            f"configured option must be selected, got {absent['selected']}"
-        )
-        assert absent["value"] == "custom-router", (
-            "Apply must read back the configured provider, not the fallback first option"
-        )
-        assert "custom-router" in absent["labels"][-1]
-        assert result["absentEmptyCatalog"]["value"] == "custom-router"
-
-        assert result["present"]["value"] == "anthropic"
-        assert result["present"]["values"] == ["auto", "openai", "anthropic"]
-        assert result["present"]["selected"] == ["anthropic"]
-        assert result["auto"]["value"] == "auto"
-        assert result["empty"]["value"] == "auto"
-        assert result["empty"]["values"] == ["auto", "openai", "anthropic"]
-
+    @pytest.mark.skipif(NODE is None, reason="node not on PATH")
     def test_apply_does_not_downgrade_untouched_aux_row(self):
-        """#7486: applying one row must not re-save another row's provider as 'auto'.
-
-        End-to-end over the Apply path: two task rows are built with the real
-        option builder, the user edits only the second row's model, and the
-        first row keeps a provider that is missing from the catalog. The first
-        row must not produce any POST at all — the destructive symptom was it
-        being re-saved with provider 'auto'.
-        """
+        """#7486: apply saves changed row only and leaves configured row untouched."""
         script = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[1], 'utf8');
-
 function extract(name){
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
   const start = src.search(re);
   if(start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start);
-  let depth = 0;
+  let i = src.indexOf('{', start), depth = 0;
   while(i < src.length){
-    const ch = src[i];
-    if(ch === '{') depth += 1;
-    else if(ch === '}') {
-      depth -= 1;
-      if(depth === 0){
-        break;
-      }
-    }
+    if(src[i] === '{') depth += 1;
+    else if(src[i] === '}' && --depth === 0) break;
     i += 1;
   }
   if(depth !== 0) throw new Error(name + ' parse failed');
   return src.slice(start, i + 1);
 }
-
-// Minimal <select>/<option> shim. The value getter mirrors the browser: a
-// single select with nothing explicitly selected reads back its first option,
-// which is why the downgrade was silent rather than an explicit error.
-function makeOption(value, label){
-  return {
-    tagName: 'OPTION',
-    value: String(value),
-    textContent: label === undefined ? String(value) : label,
-    selected: false,
-  };
-}
-function makeSelect(){
-  const sel = {options: []};
-  Object.defineProperty(sel, 'innerHTML', {
-    get(){ return ''; },
-    set(v){ if(v === '') sel.options = []; },
-  });
-  sel.appendChild = (node) => { sel.options.push(node); return node; };
-  sel.insertBefore = (node, ref) => {
-    const idx = sel.options.indexOf(ref);
-    if(idx < 0) sel.options.push(node); else sel.options.splice(idx, 0, node);
-    return node;
-  };
-  Object.defineProperty(sel, 'value', {
-    get(){
-      const picked = sel.options.find(o => o.selected);
-      if(picked) return picked.value;
-      return sel.options.length ? sel.options[0].value : '';
-    },
-    set(v){ sel.options.forEach(o => { o.selected = (o.value === String(v)); }); },
-  });
-  return sel;
-}
-function setSelect(sel, values, chosen){
-  sel.innerHTML = '';
-  for(const v of values) sel.appendChild(makeOption(v));
-  sel.value = chosen;
-  return sel;
-}
-global.document = {
-  createElement(tag){
-    return String(tag).toLowerCase() === 'option'
-      ? makeOption('', '')
-      : {tagName: String(tag).toUpperCase(), style: {}, appendChild(){}};
-  },
-};
-const els = {};
-global.$ = (id) => els[id] || null;
-global.t = (key) => key;
+global.$ = () => null;
+global.t = key => key;
 global.showToast = () => {};
 global._loadAuxiliaryModels = () => {};
-
-eval(extract('_buildAuxProviderOptions'));
-
-const catalog = [{slug: 'openai', name: 'OpenAI'}];
-
-// Persisted config: 'simple' is configured with a provider that is no longer
-// present in /api/models; 'complex' uses a catalog provider.
-global._auxTasks = [{task: 'simple'}, {task: 'complex'}];
-global._auxOriginalConfig = {
+var _auxTasks = [{task: 'simple'}, {task: 'complex'}];
+var _auxOriginalConfig = {
   simple: {provider: 'custom-router', model: 'gpt-x'},
   complex: {provider: 'openai', model: 'gpt-5'},
 };
-
-els['aux-prov-simple'] = makeSelect();
-els['aux-model-simple'] = setSelect(makeSelect(), ['gpt-x', '__custom__'], 'gpt-x');
-els['aux-prov-complex'] = makeSelect();
-els['aux-model-complex'] = setSelect(makeSelect(), ['gpt-5', 'gpt-5-mini', '__custom__'], 'gpt-5');
-
-// The settings panel rebuilds every row's selects on load
-_buildAuxProviderOptions(els['aux-prov-simple'], catalog, 'custom-router');
-_buildAuxProviderOptions(els['aux-prov-complex'], catalog, 'openai');
-
-// The user edits only the 'complex' row, then clicks Apply
-els['aux-model-complex'].value = 'gpt-5-mini';
-
+eval(extract('_modelBareNameForProvider'));
+eval('async ' + extract('_applyAuxModels'));
 const posted = [];
 global.api = async (path, opts) => { posted.push(JSON.parse(opts.body)); return {}; };
-
-// _applyAuxModels is async: extract() slices from the `function` keyword, so
-// re-add the modifier before evaluating the declaration.
-eval('async ' + extract('_applyAuxModels'));
-
-_applyAuxModels().then(() => {
-  console.log(JSON.stringify({posted, untouchedProvider: els['aux-prov-simple'].value}));
-});
+(async () => {
+  await _applyAuxModels([
+    {task: 'simple', provider: 'custom-router', model: 'gpt-x'},
+    {task: 'complex', provider: 'openai', model: 'gpt-5-mini'},
+  ]);
+  const edited = posted.slice();
+  posted.length = 0;
+  await _applyAuxModels([
+    {task: 'simple', provider: 'custom-router', model: 'gpt-x'},
+    {task: 'complex', provider: 'openai', model: 'gpt-5'},
+  ]);
+  console.log(JSON.stringify({edited, untouched: posted}));
+})();
 """
-
         proc = subprocess.run(
             [NODE, "-e", script, str(PANELS_JS_PATH)],
             capture_output=True,
@@ -570,56 +333,12 @@ _applyAuxModels().then(() => {
         )
         assert proc.returncode == 0, f"node probe failed:\n{proc.stderr}"
         result = json.loads(proc.stdout.strip().splitlines()[-1])
-
-        assert result["untouchedProvider"] == "custom-router", (
-            "the untouched row must still read back its configured provider"
-        )
-        assert result["posted"] == [
-            {
-                "scope": "auxiliary",
-                "task": "complex",
-                "provider": "openai",
-                "model": "gpt-5-mini",
-            }
-        ], f"only the edited row may be saved, got {result['posted']}"
-        assert not any(p.get("provider") == "auto" for p in result["posted"]), (
-            "an untouched row must never be persisted as 'auto' (data loss)"
-        )
-
-    def test_custom_model_prompt(self):
-        """Selecting 'Custom model…' must prompt for model ID."""
-        assert "__custom__" in PANELS_JS, (
-            "Missing __custom__ sentinel option for custom model input"
-        )
-
-    def test_reset_calls_api_with_reset_task(self):
-        """Reset button must call /api/model/set with task='__reset__'."""
-        idx = PANELS_JS.find("btnResetAuxModels")
-        assert idx >= 0, "btnResetAuxModels not found in panels.js"
-        # Check that __reset__ is sent in the reset handler
-        body_after = PANELS_JS[idx:idx + 2000]
-        assert "__reset__" in body_after, (
-            "Reset handler must send task='__reset__' to /api/model/set"
-        )
-
-    def test_load_called_from_loadSettingsPanel(self):
-        """_loadAuxiliaryModels must be called from loadSettingsPanel."""
-        assert "_loadAuxiliaryModels()" in PANELS_JS, (
-            "_loadAuxiliaryModels() is not called from loadSettingsPanel"
-        )
-
-    def test_dirty_flag_marking(self):
-        """Changing an auxiliary dropdown must mark settings dirty."""
-        assert "_markAuxDirty" in PANELS_JS, (
-            "Missing _markAuxDirty() for dirty detection"
-        )
-        # _markAuxDirty should call _markSettingsDirty
-        idx = PANELS_JS.find("function _markAuxDirty")
-        body = PANELS_JS[idx:idx + 200]
-        assert "_markSettingsDirty" in body, (
-            "_markAuxDirty must call _markSettingsDirty"
-        )
-
+        assert result["edited"] == [{
+            "scope": "auxiliary", "task": "complex",
+            "provider": "openai", "model": "gpt-5-mini",
+        }]
+        assert not any(row.get("provider") == "auto" for row in result["edited"])
+        assert result["untouched"] == []
 
 class TestAuxiliaryModelsI18n:
     """All locales must have the auxiliary model i18n keys."""

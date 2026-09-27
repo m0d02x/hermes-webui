@@ -35,6 +35,7 @@ const SHELL_ASSETS = [
   './static/i18n.js' + VQ,
   './static/workspace.js' + VQ,
   './static/library-host.js' + VQ,
+  './static/settings-host.js' + VQ,
   './static/library-react.js' + VQ,
   './static/library-react.css' + VQ,
   './static/terminal.js' + VQ,

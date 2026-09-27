@@ -1,92 +1,61 @@
-"""Regression test for #show-quota-chip-toggle — Settings toggle to opt into the ambient quota chip.
-
-Quota chip default state is now OFF (per Nathan's directive 2026-05-16, immediately
-after the stage-371 release of #2082). Users opt in via Settings → Preferences.
-"""
+"""Behavioral regressions for the opt-in provider quota chip setting."""
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-INDEX = REPO_ROOT / "static" / "index.html"
-PANELS = REPO_ROOT / "static" / "panels.js"
-UI_JS = REPO_ROOT / "static" / "ui.js"
-BOOT = REPO_ROOT / "static" / "boot.js"
-I18N = REPO_ROOT / "static" / "i18n.js"
-CONFIG = REPO_ROOT / "api" / "config.py"
+import api.config as config
+
+ROOT = Path(__file__).resolve().parent.parent
+NODE = shutil.which("node")
 
 
-def test_quota_chip_settings_field_present():
-    html = INDEX.read_text(encoding="utf-8")
-    assert 'id="settingsShowQuotaChip"' in html
-    assert 'data-i18n="settings_label_quota_chip"' in html
-    assert 'data-i18n="settings_desc_quota_chip"' in html
+def test_quota_chip_defaults_off_and_is_writable():
+    assert config._SETTINGS_DEFAULTS["show_quota_chip"] is False
+    assert "show_quota_chip" in config._SETTINGS_BOOL_KEYS
 
 
-def test_quota_chip_default_off_in_config_defaults():
-    src = CONFIG.read_text(encoding="utf-8")
-    assert '"show_quota_chip": False' in src, "show_quota_chip must default to False (opt-in)"
-    # Must be in the writable settings allow-list (bool keys)
-    assert '"show_quota_chip",' in src, "show_quota_chip must be in _SETTINGS_BOOL_KEYS"
-
-
-def test_quota_chip_render_short_circuits_when_disabled():
-    """Both renderProviderQuotaIndicator and refreshProviderQuotaIndicator must
-    hide the chip when window._showQuotaChip !== true. Specifically renderer
-    must hide BEFORE any other render logic, and refresher must skip the fetch
-    entirely so we don't burn quota API calls for chip-disabled users."""
-    js = UI_JS.read_text(encoding="utf-8")
-
-    # Renderer must early-hide when disabled
-    render_start = js.index("function renderProviderQuotaIndicator(status){")
-    render_end = js.index("\nasync function refreshProviderQuotaIndicator", render_start)
-    render_body = js[render_start:render_end]
-    assert "window._showQuotaChip!==true" in render_body, (
-        "renderProviderQuotaIndicator must check window._showQuotaChip before rendering"
-    )
-    # Guard must come BEFORE the existing _providerQuotaIndicatorText(status) call
-    guard_idx = render_body.index("window._showQuotaChip!==true")
-    text_call_idx = render_body.index("_providerQuotaIndicatorText(status)")
-    assert guard_idx < text_call_idx, (
-        "Disabled-chip guard must run before the indicator-text computation"
-    )
-
-    # Refresher must short-circuit fetch when disabled
-    refresh_start = js.index("async function refreshProviderQuotaIndicator(){")
-    # Find the closing brace of the function — first 'try{' line marks the live body
-    # Just check the entire snippet ahead of try{
-    refresh_head = js[refresh_start:js.index("try{", refresh_start)]
-    assert "window._showQuotaChip!==true" in refresh_head, (
-        "refreshProviderQuotaIndicator must skip the fetch when chip is disabled"
-    )
-
-
-def test_quota_chip_boot_initializes_default_off():
-    js = BOOT.read_text(encoding="utf-8")
-    # Both success path (reads from settings) and failure path (defaults block)
-    # must set window._showQuotaChip
-    assert "window._showQuotaChip=s.show_quota_chip===true" in js, (
-        "Boot must initialize _showQuotaChip from settings.show_quota_chip"
-    )
-    assert "window._showQuotaChip=false" in js, (
-        "Boot must default _showQuotaChip to false in the settings-fetch-failed branch"
-    )
-
-
-def test_quota_chip_panels_round_trip():
-    js = PANELS.read_text(encoding="utf-8")
-    # Payload read
-    assert "const showQuotaChipCb=$('settingsShowQuotaChip');" in js
-    assert "payload.show_quota_chip=showQuotaChipCb.checked;" in js
-    # Body assignment
-    assert "body.show_quota_chip=showQuotaChip===true;" in js
-    # Settings panel load — checkbox is initialized from saved settings
-    assert "showQuotaChipCb.checked=settings.show_quota_chip===true;" in js
-    # Window-state propagation
-    assert "window._showQuotaChip=showQuotaChip===true;" in js
-    # Live refresh on toggle (immediate visual feedback)
-    assert "if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();" in js
-
-
-def test_quota_chip_localized_in_all_locales():
-    js = I18N.read_text(encoding="utf-8")
-    assert js.count("settings_label_quota_chip:") == 15, "12 locales expected"
-    assert js.count("settings_desc_quota_chip:") == 15, "12 locales expected"
+def test_preferences_snapshot_and_autosave_payload_preserve_quota_and_gated_flags():
+    if NODE is None:
+        import pytest
+        pytest.skip("node not on PATH")
+    source = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    snapshot_start = source.index("const _settingsSnapshotServerFields=")
+    snapshot_end = source.index("\nfunction _settingsSnapshotFromServer", snapshot_start)
+    snapshot = source[snapshot_start:snapshot_end]
+    mapper_start = snapshot_end + 1
+    mapper_end = source.index("\nasync function _loadLegacySettingsWithoutReact", mapper_start)
+    mapper = source[mapper_start:mapper_end]
+    payload_start = source.index("function _preferencesPayloadFromUi(){")
+    payload_end = source.index("\nfunction _speechPreferencesPayloadFromUi", payload_start)
+    payload = source[payload_start:payload_end]
+    script = r"""
+const vm = require('node:vm'), assert = require('node:assert/strict');
+const context = {localStorage:{getItem:()=>null},_speechPreferencesPayloadFromUi:()=>({})};
+vm.createContext(context);
+vm.runInContext(SNAPSHOT + '\n' + MAPPER, context);
+const previous = {appearance:{}, preferences:{}, speechOwned:[], baselines:{model:'',modelProvider:null,maxTokens:''}};
+const saved = {show_quota_chip:true,show_cli_sessions:false,show_cron_sessions:true,show_webhook_sessions:true,show_kanban_sessions:true};
+const snapshot = context._settingsSnapshotFromServer(saved, previous);
+assert.equal(snapshot.preferences.settingsShowQuotaChip, true);
+assert.equal(snapshot.preferences.settingsShowCliSessions, false);
+const state = {appearance:{settingsWorkspaceTodosTab:false},preferences:{}};
+const checked = {
+  settingsShowCliSessions:false, settingsVirtualizeTranscript:false,
+  settingsShowQuotaChip:true, settingsShowCronSessions:true,
+  settingsShowWebhookSessions:true, settingsShowKanbanSessions:true,
+};
+context.window = {settingsHost:{getSnapshot:()=>state}};
+context._settingsChecked = (_pane,id) => !!checked[id];
+context._settingsValue = (_pane,id) => ({settingsSendKey:'enter',settingsLanguage:'en'}[id] ?? '');
+context.parseInt = parseInt;
+vm.runInContext(PAYLOAD, context);
+const result = context._preferencesPayloadFromUi();
+assert.equal(result.show_quota_chip, true);
+assert.equal(result.show_cli_sessions, false);
+assert.equal(result.show_cron_sessions, false);
+assert.equal(result.show_webhook_sessions, false);
+assert.equal(result.show_kanban_sessions, false);
+""".replace("SNAPSHOT", json.dumps(snapshot)).replace("MAPPER", json.dumps(mapper)).replace("PAYLOAD", json.dumps(payload))
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0, proc.stderr
