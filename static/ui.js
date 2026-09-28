@@ -4076,7 +4076,7 @@ function _modelsDevDisplayLabel(modelId,index){
 
 
 function _loadModelsDevCatalog(){
-  if(_modelsDevCatalog||_modelsDevCatalogPromise) return _modelsDevCatalogPromise;
+  if(_modelsDevLabelIndex||_modelsDevCatalogPromise) return _modelsDevCatalogPromise;
   if(typeof fetch!=='function') return null;
   _modelsDevCatalogPromise=fetch('https://models.dev/api.json',{credentials:'omit'})
     .then(response=>{

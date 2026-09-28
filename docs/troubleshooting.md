@@ -6,6 +6,31 @@ If your symptom isn't listed and the diagnostics don't narrow it down, file a bu
 
 ---
 
+## Conversation history loads slowly or stays on "Loading conversation..."
+
+Open the browser's developer tools, select **Network**, then open a conversation.
+Check `/api/sessions` (the sidebar) and `/api/session` (the selected conversation).
+If those requests finish quickly but the messages never appear, check **Console**
+for a JavaScript error before treating this as a storage performance problem.
+
+An error saying `_modelsDevCatalog is not defined` comes from the model-label
+lookup and can interrupt conversation loading before messages are requested.
+The loader must check its current `_modelsDevLabelIndex` state. With that fix
+installed, reload the page to load the updated script. Model-name lookup runs in
+the background; a slow or unavailable catalog should not block history.
+
+Opening a conversation first requests metadata with `messages=0`, then its
+recent messages with `messages=1`. Metadata-only requests do not build the full
+transcript or issue a `regeneration_revision`; that revision belongs to a
+complete message response. Choosing **Regenerate** loads the full transcript
+when needed, preserving the revision check without delaying initial navigation.
+
+If the requests themselves are slow, report which request is slow, its duration,
+and whether it happens on first open or every switch. Redact session IDs and
+conversation content. Do not delete session files or reset your Hermes home.
+
+---
+
 ## "AIAgent not available -- check that hermes-agent is on sys.path"
 
 **Symptom.** WebUI starts, shows the chat interface, but every chat request fails immediately with this error in the response or the server log. As of v0.51.6 the error includes a diagnostic block with the running Python interpreter, the relevant `sys.path` entries, and the most-common fix; on older versions the message is bare.

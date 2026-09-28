@@ -13417,8 +13417,11 @@ def _handle_session_get(handler, parsed) -> bool:
             isinstance(row, dict) and row.get("_active_turn_token")
             for row in _all_msgs
         )
+        # Metadata-only navigation must not reconcile the full transcript.
+        # Regeneration obtains its revision with the complete message response.
         if (
-            not raw.get("read_only")
+            load_messages
+            and not raw.get("read_only")
             and not _truncated
             and (not raw.get("is_cli_session") or imported_turn_marker)
         ):

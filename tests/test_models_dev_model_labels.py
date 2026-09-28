@@ -62,3 +62,45 @@ def test_ambiguous_model_names_and_missing_data_fall_back():
         None,
         None,
     ]
+
+
+def test_catalog_load_updates_labels_without_blocking_or_refetching():
+    driver = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const ui = fs.readFileSync(process.argv[1], 'utf8');
+const start = ui.indexOf('let _modelsDevLabelIndex=');
+const end = ui.indexOf('\nfunction syncModelChip(', start);
+assert(start >= 0 && end > start);
+let requests = 0;
+let finish;
+global.fetch = () => {
+  requests++;
+  return new Promise(resolve => { finish = resolve; });
+};
+let label = 'vendor/model-x';
+global.syncModelChip = () => {
+  label = _modelsDevDisplayLabel('vendor/model-x', _modelsDevLabelIndex);
+  _loadModelsDevCatalog();
+};
+vm.runInThisContext(ui.slice(start, end));
+(async () => {
+  const pending = _loadModelsDevCatalog();
+  assert.equal(_loadModelsDevCatalog(), pending);
+  assert.equal(label, 'vendor/model-x');
+  finish({ok: true, json: async () => ({
+    vendor: {models: {'model-x': {name: 'Model X'}}}
+  })});
+  await pending;
+  assert.equal(label, 'Model X');
+  await _loadModelsDevCatalog();
+  assert.equal(requests, 1);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    subprocess.run(
+        [shutil.which("node") or "node", "-e", driver, str(UI_JS)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )

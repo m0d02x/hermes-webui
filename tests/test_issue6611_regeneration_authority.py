@@ -36,14 +36,47 @@ def test_all_terminal_payloads_carry_fresh_revision():
     assert payload["regeneration_revision"] == regeneration_revision_for(session.messages, session=session, context=session.context_messages)
 
 
-def test_get_revision_consumer_delegates_imported_ownership_to_shared_authority():
-    from pathlib import Path
+@pytest.mark.parametrize(
+    ("query", "expected_messages", "has_revision"),
+    [
+        ("messages=0", [], False),
+        ("messages=1", ["p", "a"], True),
+        ("messages=1&msg_limit=1", ["a"], False),
+    ],
+)
+def test_get_revision_requires_a_complete_message_response(
+    monkeypatch, query, expected_messages, has_revision,
+):
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+    from api import models as models_api
+    from api import routes
 
-    source = (Path(__file__).parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
-    get_start = source.index("imported_turn_marker = any(")
-    body = source[get_start:get_start + 900]
-    assert "regeneration_authority(" in body
-    assert "imported_turn_marker" in body
+    session = _session()
+    session.context_length = 128000
+    captured = {}
+
+    def capture(_handler, data, status=200, **_kwargs):
+        captured.update(data)
+        assert status == 200
+
+    # A warm metadata request can receive the full cached Session.
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda *_args: None)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda *_args: False)
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(models_api, "get_state_db_session_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(routes, "j", capture)
+
+    routes.handle_get(
+        SimpleNamespace(_safe_webui_print=lambda *_args: None),
+        urlparse(f"/api/session?session_id={session.session_id}&resolve_model=0&{query}"),
+    )
+
+    payload = captured["session"]
+    assert [row["content"] for row in payload["messages"]] == expected_messages
+    assert bool(payload.get("regeneration_revision")) is has_revision
 
 
 def test_private_active_turn_token_never_public():
