@@ -2435,7 +2435,7 @@ function t(key, ...args) {{
   }};
   return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
 }}
-async function api() {{ return apiData; }}
+async function _runUpdateCheck() {{ return apiData; }}
 function _showUpdateBanner() {{}}
 {format_fn}
 {instruction_fn}

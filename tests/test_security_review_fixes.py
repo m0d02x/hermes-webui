@@ -99,7 +99,7 @@ def test_get_update_check_returns_cache_without_fetch(monkeypatch):
     from api import routes, updates
 
     monkeypatch.setattr(routes, "load_settings", lambda: {"check_for_updates": True})
-    monkeypatch.setattr(updates, "cached_update_status", lambda include_agent=True: {"checked_at": 123, "webui": None, "agent": None, "include_agent": include_agent})
+    monkeypatch.setattr(updates, "cached_update_status", lambda include_agent=True, channel=None: {"checked_at": 123, "webui": None, "agent": None, "include_agent": include_agent})
     monkeypatch.setattr(updates, "check_for_updates", lambda *a, **k: (_ for _ in ()).throw(AssertionError("GET must not fetch")))
 
     handler = _Handler(client_ip="127.0.0.1")
@@ -134,8 +134,8 @@ def test_post_update_check_performs_forced_fetch(monkeypatch):
     monkeypatch.setattr(routes, "load_settings", lambda: {"check_for_updates": True})
     monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
 
-    def fake_check(*, force=False, include_agent=True, channel="stable"):
-        calls.append((force, include_agent))
+    def fake_check(*, force=False, include_agent=True, channel="stable", wait=None):
+        calls.append((force, include_agent, wait))
         return {"checked_at": 456, "webui": None, "agent": None}
 
     monkeypatch.setattr("api.updates.check_for_updates", fake_check)
@@ -143,7 +143,8 @@ def test_post_update_check_performs_forced_fetch(monkeypatch):
     handler = _Handler(client_ip="127.0.0.1", body=body, headers={"Content-Length": str(len(body))})
     routes.handle_post(handler, SimpleNamespace(path="/api/updates/check", query=""))
     assert handler.status == 200
-    assert calls == [(True, True)]
+    # The POST wait is bounded so the reply fits reverse-proxy timeouts.
+    assert calls == [(True, True, 20)]
 
 
 def test_onboarding_untrusted_forwarded_header_denies_lan_proxy_socket(monkeypatch):

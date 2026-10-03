@@ -209,15 +209,15 @@ def test_api_has_default_timeout_and_per_call_override_contract():
 
 
 def test_update_flows_keep_explicit_longer_timeouts():
-    """Network-bound update checks need a single-attempt 300s latency budget."""
+    """Update checks poll a background check; apply/force keep a 120s budget."""
     boot = _source(BOOT_JS)
     src = _source(UI_JS)
     panels = _source(PANELS_JS)
-    # /api/updates/check builds its body in a _checkBody var (to optionally add
-    # an explicit channel). Both boot and manual callers need enough time for
-    # the endpoint's bounded fetches; api() does not retry ordinary timeouts.
-    assert "api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000})" in boot
-    assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000})" in panels
+    # Boot and Settings both go through _runUpdateCheck, which bounds the POST
+    # (server answers within ~20s) and polls while the check keeps running.
+    assert "_runUpdateCheck({force:false})" in boot
+    assert "await _runUpdateCheck(_checkBody)" in panels
+    assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(body),timeoutMs:60000})" in src
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
     # apply/force now build their body inline to optionally carry the offered
     # channel (Codex debounce-race fix), but MUST still carry the 120s override.

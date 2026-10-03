@@ -82,3 +82,59 @@ def test_updates_check_enabled_runs_check_without_force(monkeypatch):
     """With check_for_updates on, a normal POST runs the real check (no regression)."""
     cap = _run_updates_check(monkeypatch, check_for_updates_enabled=True, body={})
     assert cap.get("ok") == {"reached_real_check": True}, cap
+
+def test_poll_keeps_original_job_key_after_settings_change(monkeypatch, tmp_path):
+    """A channel/Agent toggle in another tab mid-check must not hijack the poll.
+
+    POST starts an experimental check; settings then switch to stable with
+    Agent updates ignored. GET ?poll=1 carrying the original key must still
+    report checking=True for experimental — not done/stale under new settings.
+    """
+    import threading
+    from unittest.mock import patch
+    from urllib.parse import urlsplit
+
+    import api.updates as updates
+
+    gate = threading.Event()
+
+    def slow_check_repo(path, name, channel='stable'):
+        if name == 'webui':
+            gate.wait(5)
+        return {'name': name, 'behind': 3 if name == 'webui' else 0}
+
+    cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'experimental'}
+    cap = {}
+
+    def _j(_handler, obj, *_a, **kw):
+        cap['ok'] = obj
+        cap['status'] = kw.get('status', 200)
+        return True
+
+    class _GetHandler:
+        client_address = ('127.0.0.1', 12345)
+
+    monkeypatch.setattr(routes, 'j', _j)
+    with patch.dict(updates._update_cache, cache, clear=True), \
+         patch.dict(updates._check_jobs, {}, clear=True), \
+         patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_AGENT_DIR', tmp_path), \
+         patch.object(updates, '_check_repo', side_effect=slow_check_repo):
+        first = updates.check_for_updates(force=True, include_agent=True, channel='experimental', wait=0.05)
+        assert first['checking'] is True
+        assert first['channel'] == 'experimental'
+        # Settings change in another tab: stable + Agent ignored.
+        monkeypatch.setattr(routes, 'load_settings', lambda: {'check_for_updates': True, 'ignore_agent_updates': True, 'update_channel': 'stable'})
+        routes.handle_get(_GetHandler(), urlsplit('/api/updates/check?poll=1&channel=experimental&include_agent=1'))
+        polled = cap['ok']
+        assert polled['checking'] is True, polled
+        assert polled['channel'] == 'experimental', polled
+        assert 'stale_channel' not in polled, polled
+
+        gate.set()
+        updates._check_jobs[('experimental', True)]['thread'].join(5)
+        routes.handle_get(_GetHandler(), urlsplit('/api/updates/check?poll=1&channel=experimental&include_agent=1'))
+        done = cap['ok']
+
+    assert done['checking'] is False
+    assert done['webui']['behind'] == 3

@@ -14415,10 +14415,20 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/updates/check":
         settings = load_settings()
-        if not settings.get("check_for_updates", True):
+        qs = parse_qs(parsed.query)
+        # poll=1 is the follow-up to a POST check that is still running in the
+        # background; a manual force-check may run with auto-checks disabled.
+        polling = qs.get("poll", ["0"])[0] == "1"
+        if not settings.get("check_for_updates", True) and not polling:
             return j(handler, {"disabled": True})
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
-        qs = parse_qs(parsed.query)
+        # A poll carries the original job's key: the channel/Agent setting may
+        # have changed in another tab mid-check, and the poll must keep asking
+        # for the job it started, not the new settings.
+        if polling:
+            agent_param = qs.get("include_agent", [None])[0]
+            if agent_param in ("1", "true", "0", "false"):
+                include_agent_updates = agent_param in ("1", "true")
         # ?simulate=1 returns fake behind counts for UI testing (localhost only)
         if (
             qs.get("simulate", ["0"])[0] == "1"
@@ -14451,7 +14461,10 @@ def handle_get(handler, parsed) -> bool:
             )
         from api.updates import cached_update_status
 
-        return j(handler, cached_update_status(include_agent=include_agent_updates))
+        channel = qs.get("channel", [None])[0]
+        if channel not in ("stable", "experimental"):
+            channel = None
+        return j(handler, cached_update_status(include_agent=include_agent_updates, channel=channel))
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
@@ -15280,7 +15293,10 @@ def handle_post(handler, parsed) -> bool:
         # exception protection across all route handlers. Does NOT fix #6086
         # (root cause is likely signal/process-group reaping, per maintainer analysis).
         try:
-            payload = check_for_updates(force=force, include_agent=include_agent_updates, channel=channel)
+            # Bounded wait keeps the response inside reverse-proxy timeouts
+            # (Cloudflare: ~100s). A slower check keeps running; the reply then
+            # carries checking=True and the client polls GET ?poll=1.
+            payload = check_for_updates(force=force, include_agent=include_agent_updates, channel=channel, wait=20)
         except Exception:
             logger.exception("update check failed unexpectedly (defensive guard caught exception)")
             return bad(handler, "Update check failed, see server log for details", status=500)

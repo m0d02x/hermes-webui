@@ -10460,6 +10460,26 @@ function _renderUpdateWhatsNewLinks(data){
   }
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
+// POST /api/updates/check answers within ~20s so it fits reverse-proxy timeouts
+// (Cloudflare ~100s); a slower check (a checkout far behind upstream) keeps
+// running server-side and replies checking=true. Poll the cache until it ends.
+async function _runUpdateCheck(body){
+  let data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(body),timeoutMs:60000});
+  // Poll the job this check started: carry its resolved key, not the live
+  // settings, so a channel/Agent toggle in another tab mid-check can't
+  // switch the poll to a different key and report done/stale early.
+  const pollQs='poll=1'
+    +(data&&data.channel?'&channel='+encodeURIComponent(data.channel):'')
+    +(data&&typeof data.include_agent!=='undefined'?'&include_agent='+(data.include_agent?'1':'0'):'');
+  const deadline=Date.now()+300000;
+  while(data&&data.checking&&Date.now()<deadline){
+    await new Promise(r=>setTimeout(r,3000));
+    data=await api('/api/updates/check?'+pollQs,{timeoutMs:30000});
+  }
+  if(data&&data.checking) throw new Error('Update check is still running; try again in a minute.');
+  if(data&&data.check_error) throw new Error(data.check_error);
+  return data;
+}
 function _showUpdateBanner(data){
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);

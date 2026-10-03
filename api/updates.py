@@ -42,7 +42,9 @@ _update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent':
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
-_check_in_progress = False
+# Background update checks, one per (channel, include_agent); see check_for_updates.
+_check_jobs = {}
+_check_run_lock = threading.Lock()
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
@@ -263,6 +265,16 @@ def _run_git(args, cwd, timeout=10):
         return 'git executable not found', False
     except OSError as exc:
         return f'git failed to start: {exc}', False
+
+
+# A killed fetch keeps nothing, so a checkout far behind upstream (an Agent
+# untouched for weeks: ~11k commits, ~2 min) could never catch up under a short
+# limit — every Settings "Check now" restarted the same download and timed out.
+# Checks run in the background (the UI polls), so they can afford this budget.
+# Apply/force keep a short fetch: they follow a successful check, so their
+# fetch is incremental, and they must fit the client's 120s request budget.
+_GIT_FETCH_TIMEOUT = 120
+_APPLY_FETCH_TIMEOUT = 15
 
 
 def _is_git_lock_error(output: str) -> bool:
@@ -1166,7 +1178,7 @@ def _check_repo_branch(path, name, *, fetch=True):
 
     # Fetch latest from origin (network call, cached by TTL)
     if fetch:
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=_GIT_FETCH_TIMEOUT)
         if not fetch_ok:
             return {'name': name, 'behind': 0, 'error': 'fetch failed'}
 
@@ -1268,7 +1280,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # after a squash-merge that re-points a release tag at a new SHA) jams
     # the update path indefinitely with "would clobber existing tag" errors.
     # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=_GIT_FETCH_TIMEOUT)
     if not fetch_ok:
         release_info = _check_repo_release(path, name, channel)
         message = 'fetch failed'
@@ -1347,7 +1359,14 @@ def cached_update_status(*, include_agent=True, channel=None):
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
     with _cache_lock:
+        job = _check_jobs.get((channel, include_agent))
+        checking = job is not None and job['thread'].is_alive()
         cached = dict(_update_cache)
+        # A check for another key may have overwritten the shared cache since
+        # this key's job finished; that job's own result is then the answer.
+        cache_matches = cached.get('channel') == channel and cached.get('include_agent') == include_agent
+        if not cache_matches and job is not None and not checking and job['result'] is not None:
+            cached = dict(job['result'])
     # If the cache was populated for a different channel, it is not a valid
     # answer for this channel — signal that so callers don't render stale
     # cross-channel data as authoritative.
@@ -1359,16 +1378,51 @@ def cached_update_status(*, include_agent=True, channel=None):
         if not include_agent:
             cached['agent'] = _ignored_agent_update_info()
     cached['cached'] = True
+    cached['checking'] = checking
+    if job is not None and not checking and job['error'] is not None:
+        cached['check_error'] = 'Update check failed, see server log for details'
     return cached
 
 
-def check_for_updates(force=False, *, include_agent=True, channel=None):
-    """Return cached update status for webui and agent repos."""
-    global _check_in_progress
+def _run_update_check(job, include_agent, channel):
+    # Serialize checks: two jobs (e.g. stable and experimental) must not run
+    # concurrent git fetches against the same checkouts.
+    with _check_run_lock:
+        try:
+            webui_info = _check_repo(REPO_ROOT, 'webui', channel)
+            # The update channel is a WebUI-only concept. The Agent is a separate
+            # project that tags plain v* and legitimately tracks master past its
+            # tags; it must ALWAYS use the default channel regardless of the user's
+            # WebUI channel selection. (Codex gate: passing 'experimental' here made
+            # the Agent ignore its v* tags and fall back to origin/master.)
+            agent_info = _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL) if include_agent else _ignored_agent_update_info()
+            with _cache_lock:
+                _update_cache['webui'] = webui_info
+                _update_cache['agent'] = agent_info
+                _update_cache['checked_at'] = time.time()
+                _update_cache['include_agent'] = include_agent
+                _update_cache['channel'] = channel
+                job['result'] = dict(_update_cache)
+        except Exception as exc:
+            logger.exception("update check failed")
+            job['error'] = exc
+
+
+def check_for_updates(force=False, *, include_agent=True, channel=None, wait=None):
+    """Return update status for webui and agent repos, refreshing it if stale.
+
+    The refresh runs in a background job keyed by ``(channel, include_agent)``
+    so a slow fetch (a checkout far behind upstream) can finish even when the
+    HTTP request cannot wait for it. ``wait`` bounds how long this call blocks
+    (None = until done). If the job is still running, the result carries
+    ``checking: True``; callers poll ``cached_update_status()`` for the same
+    key until ``checking`` clears.
+    """
     include_agent = bool(include_agent)
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    key = (channel, include_agent)
     with _cache_lock:
         # Cache is only valid when BOTH the channel AND include_agent match —
         # a channel switch must not serve the previous channel's answer, and an
@@ -1378,35 +1432,33 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             _update_cache.get('include_agent') == include_agent
             and _update_cache.get('channel') == channel
         )
+        job = _check_jobs.get(key)
+        running = job is not None and job['thread'].is_alive()
         if (
             not force
+            and not running
             and cache_matches
             and time.time() - _update_cache['checked_at'] < CACHE_TTL
         ):
             return dict(_update_cache)
-        if _check_in_progress and cache_matches:
-            return dict(_update_cache)  # another thread is already checking this channel
-        _check_in_progress = True
+        if not running:
+            # Join the in-flight job for this exact key; otherwise start one.
+            job = {'result': None, 'error': None}
+            job['thread'] = threading.Thread(
+                target=_run_update_check,
+                args=(job, include_agent, channel),
+                name=f'update-check-{channel}',
+                daemon=True,
+            )
+            _check_jobs[key] = job
+            job['thread'].start()
 
-    try:
-        # Run checks outside the lock (network I/O)
-        webui_info = _check_repo(REPO_ROOT, 'webui', channel)
-        # The update channel is a WebUI-only concept. The Agent is a separate
-        # project that tags plain v* and legitimately tracks master past its
-        # tags; it must ALWAYS use the default channel regardless of the user's
-        # WebUI channel selection. (Codex gate: passing 'experimental' here made
-        # the Agent ignore its v* tags and fall back to origin/master.)
-        agent_info = _check_repo(_AGENT_DIR, 'agent', DEFAULT_UPDATE_CHANNEL) if include_agent else _ignored_agent_update_info()
-
-        with _cache_lock:
-            _update_cache['webui'] = webui_info
-            _update_cache['agent'] = agent_info
-            _update_cache['checked_at'] = time.time()
-            _update_cache['include_agent'] = include_agent
-            _update_cache['channel'] = channel
-            return dict(_update_cache)
-    finally:
-        _check_in_progress = False
+    job['thread'].join(wait)
+    if job['thread'].is_alive():
+        return cached_update_status(include_agent=include_agent, channel=channel)
+    if job['error'] is not None:
+        raise job['error']
+    return dict(job['result'])
 
 
 def _repo_path_for_update_target(target: str):
@@ -1980,7 +2032,7 @@ def apply_force_update(target: str, channel=None) -> dict:
         # --force so a remote re-tag (e.g. squash-merge that re-points an
         # existing release tag) doesn't jam the apply path with "would clobber
         # existing tag". See #2756.
-        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=_APPLY_FETCH_TIMEOUT)
         if not fetch_ok:
             return {
                 'ok': False,
@@ -2130,7 +2182,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
 
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=_APPLY_FETCH_TIMEOUT)
     if not fetch_ok:
         if _is_git_lock_error(fetch_out):
             return {

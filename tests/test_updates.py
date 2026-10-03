@@ -560,7 +560,7 @@ def test_force_update_dirty_probe_timeout_keeps_stable_no_ref_as_an_exact_noop(
         'channel': 'stable',
     }
     assert calls == [
-        (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
+        (['fetch', 'origin', '--quiet', '--tags', '--force'], updates._APPLY_FETCH_TIMEOUT),
         (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
     ]
     assert 'working-tree state as unknown' in caplog.text
@@ -605,7 +605,7 @@ def test_force_update_dirty_probe_non_dirty_status_keeps_stable_no_ref_as_an_exa
         'channel': 'stable',
     }
     assert calls == [
-        (['fetch', 'origin', '--quiet', '--tags', '--force'], 15),
+        (['fetch', 'origin', '--quiet', '--tags', '--force'], updates._APPLY_FETCH_TIMEOUT),
         (['diff-index', '--quiet', 'HEAD', '--'], updates._FORCE_DIRTY_PROBE_TIMEOUT),
     ]
     assert 'working-tree state as unknown' in caplog.text
@@ -752,6 +752,106 @@ def test_update_cache_is_scoped_by_agent_inclusion(tmp_path):
     assert included['agent']['name'] == 'agent'
     assert included['agent'].get('ignored') is not True
     assert calls == ['webui', 'webui', 'agent']
+
+
+def test_slow_update_check_keeps_running_after_bounded_wait(tmp_path):
+    """A check slower than the request wait must finish in the background.
+
+    Before: a far-behind Agent checkout needed a fetch longer than any single
+    request could wait, so every Settings "Check now" died at the timeout and
+    never caught up. The POST now returns checking=True and pollers see the
+    finished result in the cache.
+    """
+    import threading
+
+    release = threading.Event()
+    calls = []
+
+    def slow_check_repo(path, name, channel='stable'):
+        calls.append(name)
+        if name == 'agent':
+            release.wait(5)
+        return {'name': name, 'behind': 2 if name == 'agent' else 0}
+
+    cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'stable'}
+    with patch.dict(updates._update_cache, cache, clear=True), \
+         patch.dict(updates._check_jobs, {}, clear=True), \
+         patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_AGENT_DIR', tmp_path), \
+         patch.object(updates, '_check_repo', side_effect=slow_check_repo):
+        first = updates.check_for_updates(force=True, include_agent=True, channel='stable', wait=0.05)
+        assert first['checking'] is True
+        assert updates.cached_update_status(include_agent=True, channel='stable')['checking'] is True
+        # A second request joins the in-flight check instead of starting another.
+        again = updates.check_for_updates(force=True, include_agent=True, channel='stable', wait=0.05)
+        assert again['checking'] is True
+
+        release.set()
+        updates._check_jobs[('stable', True)]['thread'].join(5)
+        polled = updates.cached_update_status(include_agent=True, channel='stable')
+
+    assert polled['checking'] is False
+    assert polled['agent']['behind'] == 2
+    assert calls == ['webui', 'agent']
+
+
+def test_concurrent_checks_for_different_channels_never_share_results(tmp_path):
+    """Each in-flight check is keyed by (channel, include_agent).
+
+    Interleaving: cache holds stable; an experimental check starts; a stable
+    request must NOT join it (and receive experimental results), and a second
+    experimental request must join it rather than start a duplicate fetch.
+    """
+    import threading
+
+    gates = {'stable': threading.Event(), 'experimental': threading.Event()}
+    calls = []
+
+    def gated_check_repo(path, name, channel='stable'):
+        if name == 'webui':
+            calls.append(channel)
+            gates[channel].wait(5)
+            return {'name': 'webui', 'behind': 1 if channel == 'stable' else 7, 'channel': channel}
+        return {'name': 'agent', 'behind': 0}
+
+    stable_cache = {
+        'webui': {'name': 'webui', 'behind': 0, 'channel': 'stable'}, 'agent': None,
+        'checked_at': time.time(), 'include_agent': True, 'channel': 'stable',
+    }
+    with patch.dict(updates._update_cache, stable_cache, clear=True), \
+         patch.dict(updates._check_jobs, {}, clear=True), \
+         patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_AGENT_DIR', tmp_path), \
+         patch.object(updates, '_check_repo', side_effect=gated_check_repo):
+        exp1 = updates.check_for_updates(force=True, include_agent=True, channel='experimental', wait=0.05)
+        stable = updates.check_for_updates(force=True, include_agent=True, channel='stable', wait=0.05)
+        exp2 = updates.check_for_updates(force=True, include_agent=True, channel='experimental', wait=0.05)
+        assert exp1['checking'] and stable['checking'] and exp2['checking']
+        # Second experimental request joined; stable got its own job.
+        assert updates._check_jobs[('experimental', True)]['thread'].is_alive()
+        assert updates._check_jobs[('stable', True)]['thread'].is_alive()
+        assert len({id(j) for j in updates._check_jobs.values()}) == 2
+
+        # Finish experimental first: stable pollers must still see checking.
+        gates['experimental'].set()
+        updates._check_jobs[('experimental', True)]['thread'].join(5)
+        assert updates.cached_update_status(include_agent=True, channel='stable')['checking'] is True
+        exp_done = updates.cached_update_status(include_agent=True, channel='experimental')
+        assert exp_done['checking'] is False
+        assert exp_done['webui']['behind'] == 7
+
+        gates['stable'].set()
+        updates._check_jobs[('stable', True)]['thread'].join(5)
+        stable_done = updates.cached_update_status(include_agent=True, channel='stable')
+        # Experimental's finished answer survives the later stable cache write.
+        exp_after = updates.cached_update_status(include_agent=True, channel='experimental')
+
+    assert stable_done['checking'] is False
+    assert stable_done['webui']['behind'] == 1 and stable_done['channel'] == 'stable'
+    assert exp_after['webui']['behind'] == 7 and 'stale_channel' not in exp_after
+    # One fetch per key: no duplicate experimental fetch, and jobs never overlapped.
+    assert calls == ['experimental', 'stable']
+
 
 
 def test_run_git_returns_stderr_on_failure(tmp_path):
