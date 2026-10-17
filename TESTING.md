@@ -76,10 +76,11 @@ that throws only when a real browser executes the page (e.g. a `function X(){}` 
 `window.X = {}` name collision like #2715/#2771, which ESLint can't see).
 
 `tests/browser_smoke.py` boots the real `server.py` (agent-free, on an ephemeral
-port, with an isolated temp state dir) and loads the key pages in headless
-Chromium, failing if **any** console error or uncaught JS exception fires on load.
-It runs in CI (`.github/workflows/browser-smoke.yml`) on every PR and push to
-master, and locally:
+port, with an isolated temp state dir) and loads key pages in headless Chromium.
+On the root page it also checks desktop rail collapse → expansion → collapse,
+including the `aria-expanded` state and rail width; any console error or failed
+interaction fails the run. It runs in CI (`.github/workflows/browser-smoke.yml`)
+on every PR and push to master, and locally:
 
 ```bash
 pip install playwright && python -m playwright install chromium

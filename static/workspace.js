@@ -681,6 +681,7 @@ const _WS_SKELETON_ROWS = [
 let _wsTreeGen = 0;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
+  if(typeof _wsSearchSyncOwner === 'function') _wsSearchSyncOwner();  // close file search opened against the old workspace
   return _wsTreeGen;
 }
 if(typeof window!=='undefined') window.bumpWorkspaceTreeGen = bumpWorkspaceTreeGen;
@@ -728,6 +729,7 @@ function clearWorkspaceTreeSkeleton(){
 }
 
 async function loadDir(path, opts={}){
+  if(typeof _wsSearchSyncOwner === 'function') _wsSearchSyncOwner();  // session switch: drop search rows from the previous workspace
   const preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
@@ -1545,5 +1547,137 @@ if (typeof document !== 'undefined') {
     document.addEventListener('DOMContentLoaded', _wsUploadInit, {once: true});
   } else {
     _wsUploadInit();
+  }
+}
+
+// ── File search (Files tab) ─────────────────────────────────────────────────
+// Server-side recursive filename search (/api/list/search). While a query is
+// active the results list replaces the tree; clearing it restores the tree.
+//
+// Ownership: results and their rows belong to ONE workspace, identified by
+// {sid, gen} = session_id + _wsTreeGen at the time search was opened/requested.
+// A session switch or a same-sid profile switch (which only bumps _wsTreeGen,
+// see #4671) must never let old rows act on the new workspace, so every
+// response, row click and post-await write re-checks the token, and search is
+// closed whenever the workspace changes (bumpWorkspaceTreeGen / loadDir).
+let _wsSearchSeq = 0;
+let _wsSearchTimer = null;
+let _wsSearchOwner = null;   // {sid, gen} while the search bar is open
+
+function _wsSearchToken(){
+  return S.session ? {sid: S.session.session_id, gen: _wsTreeGen} : null;
+}
+function _wsSearchTokenCurrent(tok){
+  return !!tok && !!S.session && S.session.session_id === tok.sid && _wsTreeGen === tok.gen;
+}
+// Close search if the workspace it was opened against is gone.
+function _wsSearchSyncOwner(){
+  if(_wsSearchOwner && !_wsSearchTokenCurrent(_wsSearchOwner)) toggleWorkspaceSearch(false);
+}
+
+function toggleWorkspaceSearch(force){
+  const bar = $('wsSearchBar');
+  const input = $('wsSearchInput');
+  const btn = $('btnSearchFiles');
+  if(!bar || !input) return;
+  const open = typeof force === 'boolean' ? force : bar.hidden;
+  bar.hidden = !open;
+  if(btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if(open){
+    _wsSearchOwner = _wsSearchToken();
+    switchWorkspacePanelTab('files');
+    input.focus();
+    input.select();
+  }else{
+    _wsSearchOwner = null;
+    input.value = '';
+    _wsSearchSeq++;
+    clearTimeout(_wsSearchTimer);
+    _renderWorkspaceSearch(null, null);
+  }
+}
+
+function onWorkspaceSearchInput(){
+  clearTimeout(_wsSearchTimer);
+  _wsSearchTimer = setTimeout(_runWorkspaceSearch, 200);
+}
+
+async function _runWorkspaceSearch(){
+  _wsSearchSyncOwner();
+  const q = ($('wsSearchInput').value || '').trim();
+  const seq = ++_wsSearchSeq;
+  const tok = _wsSearchToken();
+  if(!q || !tok){ _renderWorkspaceSearch(null, null); return; }
+  let data;
+  try{
+    data = await api(`/api/list/search?session_id=${encodeURIComponent(tok.sid)}&q=${encodeURIComponent(q)}`);
+  }catch(e){
+    data = {results: [], truncated: false, error: true};
+  }
+  // Drop stale responses: newer keystroke, cleared box, session switch, or a
+  // same-sid profile switch.
+  if(seq !== _wsSearchSeq || !_wsSearchTokenCurrent(tok)) return;
+  _renderWorkspaceSearch(data, tok);
+}
+
+// Open the folder a search result points at, with its ancestors expanded.
+// Every await is followed by an ownership check so a mid-flight switch can
+// never write the old workspace's listings into the new workspace's cache.
+async function _openWorkspaceSearchDir(path, tok){
+  for(let p = path; p; p = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '') S._expandedDirs.add(p);
+  if(typeof _saveExpandedDirs === 'function') _saveExpandedDirs();
+  await loadDir('.');
+  if(!_wsSearchTokenCurrent(tok)) return;
+  // loadDir('.') cleared the dir cache; refill the expanded chain so the target
+  // folder is visible immediately (the tree otherwise fetches lazily on expand).
+  for(const p of [...S._expandedDirs]){
+    if(S._dirCache[p]) continue;
+    let entries;
+    try{ entries = (await api(_workspaceRouteForPath(p, 'list'))).entries || []; }catch(_){ entries = []; }
+    if(!_wsSearchTokenCurrent(tok)) return;
+    S._dirCache[p] = entries;
+  }
+  renderFileTree();
+}
+
+function _renderWorkspaceSearch(data, tok){
+  const box = $('wsSearchResults');
+  const tree = $('fileTree');
+  if(!box) return;
+  box.innerHTML = '';
+  box.hidden = !data;
+  if(tree) tree.style.display = data ? 'none' : '';
+  if(!data) return;
+  if(!data.results.length){
+    const none = document.createElement('div');
+    none.className = 'ws-search-empty';
+    none.textContent = data.error ? t('workspace_search_failed') : t('workspace_search_no_results');
+    box.appendChild(none);
+    return;
+  }
+  for(const item of data.results){
+    const el = document.createElement('div');
+    el.className = 'file-item ws-search-item';
+    el.title = item.path;
+    el.innerHTML = `<span class="file-icon">${fileIcon(item.name, item.type)}</span>` +
+      `<span class="file-name">${esc(item.name)}</span>` +
+      `<span class="ws-search-path">${esc(item.path.slice(0, item.path.length - item.name.length).replace(/\/$/, ''))}</span>`;
+    el.onclick = async () => {
+      // Rows are bound to the workspace that produced them.
+      if(!_wsSearchTokenCurrent(tok)){ _wsSearchSyncOwner(); return; }
+      if(item.type === 'dir'){
+        toggleWorkspaceSearch(false);
+        await _openWorkspaceSearchDir(item.path, tok);
+      }else{
+        await openFile(item.path);
+      }
+    };
+    box.appendChild(el);
+  }
+  if(data.truncated){
+    const more = document.createElement('div');
+    more.className = 'ws-search-empty';
+    more.textContent = t('workspace_search_truncated');
+    box.appendChild(more);
   }
 }

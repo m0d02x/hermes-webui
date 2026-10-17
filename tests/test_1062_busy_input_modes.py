@@ -41,8 +41,8 @@ class TestBusyInputModeSetting:
         idx = CONFIG_PY.find('"default_message_mode": {')
         assert idx >= 0, "default_message_mode entry missing from _SETTINGS_ENUM_KEYS"
         block = CONFIG_PY[idx:idx + 200]
-        assert '"queue"' in block and '"interrupt"' in block and '"steer"' in block, (
-            "default_message_mode enum must contain {queue, interrupt, steer}"
+        assert '"queue"' in block and '"interrupt"' in block and '"steer"' in block and '"steer_one"' in block, (
+            "default_message_mode enum must contain {queue, interrupt, steer, steer_one}"
         )
 
 

@@ -11390,6 +11390,7 @@ _SETTINGS_DEFAULTS = {
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
     "update_channel": "stable",  # stable | experimental — which release stream to track (stable = soaked/promoted; experimental = every batch)
+    "ignore_webui_updates": False,  # keep Agent update notices but suppress WebUI update checks
     "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "tts_enabled": False,
@@ -11456,7 +11457,7 @@ _SETTINGS_DEFAULTS = {
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
-    "default_message_mode": "steer",  # behavior when sending while agent is running: queue | interrupt | steer
+    "default_message_mode": "steer",  # behavior when sending while agent is running: queue | interrupt | steer | steer_one
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
     "provider_cost_budget": None,
@@ -11695,7 +11696,7 @@ _SETTINGS_ENUM_VALUES = {
     "update_channel": {"stable", "experimental"},
     "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
-    "default_message_mode": {"queue", "interrupt", "steer"},
+    "default_message_mode": {"queue", "interrupt", "steer", "steer_one"},
     "chat_activity_display_mode": {"compact_worklog", "transparent_stream", "hide_all_activity"},
     "structured_code_default_view": {"auto", "on", "off"},
 }
@@ -11734,6 +11735,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_previous_messaging_sessions",
     "sync_to_insights",
     "check_for_updates",
+    "ignore_webui_updates",
     "ignore_agent_updates",
     "whats_new_summary_enabled",
     "tts_enabled",

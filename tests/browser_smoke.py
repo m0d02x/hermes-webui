@@ -13,7 +13,8 @@ WHY THIS EXISTS
   Every one of those throws on load or first interaction and produces a blank or
   broken page for *every* user. This smoke boots the real server.py and loads
   the key pages in headless Chromium, failing if ANY uncaught exception or
-  console error fires.
+  console error fires; the root page also verifies the desktop rail expands and
+  collapses with matching aria-expanded state and rail width.
 
 SCOPE
   Deliberately AGENT-FREE so it runs in CI (which does not install hermes-agent):
@@ -77,6 +78,96 @@ def _wait_for_health(timeout=30):
             pass
         time.sleep(0.5)
     return False
+
+
+def _check_appearance_transitions(page):
+    for width in (1280, 390):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.mouse.move(0, 0)
+        page.wait_for_timeout(200)
+        problems = page.evaluate("""async () => {
+            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const root = document.documentElement;
+            _applyTheme('light');
+            _applySkin('default');
+            for (let i = 0; i < 3; i++) await frame();
+            const problems = [];
+            const onTransition = event => problems.push('transitionrun: ' + event.propertyName);
+            document.addEventListener('transitionrun', onTransition);
+            try {
+                const swaps = [
+                    ['theme', 'dark'], ['theme', 'light'],
+                    ['skin', 'ares'], ['skin', 'poseidon'],
+                    ['skin', 'geist-contrast'], ['skin', 'default'],
+                ];
+                for (const [axis, value] of swaps) {
+                    const before = axis === 'theme'
+                        ? getComputedStyle(document.body).backgroundColor
+                        : getComputedStyle(root).getPropertyValue('--accent');
+                    if (axis === 'theme') _applyTheme(value);
+                    else _applySkin(value);
+                    const after = axis === 'theme'
+                        ? getComputedStyle(document.body).backgroundColor
+                        : getComputedStyle(root).getPropertyValue('--accent');
+                    if (before === after) problems.push(axis + ' palette did not change: ' + value);
+                    if (axis === 'theme' && root.classList.contains('dark') !== (value === 'dark'))
+                        problems.push('theme not applied: ' + value);
+                    if (axis === 'skin' && (root.dataset.skin || 'default') !== value)
+                        problems.push('skin not applied: ' + value);
+                    // Flush real browser styles, including descendants and pseudo-elements.
+                    if (document.getAnimations().some(a => a instanceof CSSTransition))
+                        problems.push(axis + ' swap animated: ' + value);
+                    await frame(); // The next swap happens in the adjacent animation frame.
+                }
+                for (let i = 0; i < 3; i++) {
+                    await frame();
+                    if (document.getAnimations().some(a => a instanceof CSSTransition))
+                        problems.push('transition after adjacent swaps');
+                }
+            } finally {
+                document.removeEventListener('transitionrun', onTransition);
+            }
+            return problems;
+        }""")
+        assert not problems, f"{width}px appearance swaps: {problems}"
+        suggestion = page.locator(".suggestion").first
+        suggestion.evaluate("""el => {
+            window.__smokeHoverTransitions = [];
+            el.addEventListener('transitionrun', event => {
+                window.__smokeHoverTransitions.push(event.propertyName);
+            });
+        }""")
+        suggestion.hover()
+        page.wait_for_function(
+            "window.__smokeHoverTransitions.includes('transform')", timeout=2000
+        )
+        page.mouse.move(0, 0)
+        page.wait_for_timeout(200)
+
+
+def _check_settings_appearance(page):
+    page.get_by_role("button", name="Settings", exact=True).click()
+    page.locator('[data-settings-section="appearance"]').click()
+    page.locator('[data-theme-val="dark"]').click()
+    page.locator('[data-theme-val="system"]').click()
+    page.wait_for_function("localStorage.getItem('hermes-theme') === 'system'")
+    label = '<img src=x onerror=alert(1)>'
+    registered = page.evaluate("""label => window.registerHermesSkin({
+        name: 'Browser smoke skin', value: 'browser-smoke-skin', label,
+        colors: ['#123456', '#abcdef', '#654321'],
+        tokens: {'--accent': '#123456'}
+    })""", label)
+    assert registered, "extension skin must register"
+    skin = page.locator('[data-skin-val="browser-smoke-skin"]')
+    skin.wait_for(state="visible")
+    assert skin.text_content() == label, "extension skin label must render literally"
+    assert skin.locator("img, [onerror]").count() == 0, "skin label injected markup"
+    colors = skin.locator(".settings-skin-swatches i").evaluate_all(
+        "elements => elements.map(el => getComputedStyle(el).backgroundColor)"
+    )
+    assert colors == ["rgb(18, 52, 86)", "rgb(171, 205, 239)", "rgb(101, 67, 33)"], (
+        f"registered skin swatches must display supplied colors: {colors}"
+    )
 
 
 def main():
@@ -143,6 +234,36 @@ def main():
                     page.wait_for_selector("#msg, .app, body", timeout=10000)
                 except Exception:
                     pass
+                if path == "/":
+                    rail = page.locator(".rail")
+                    toggle = page.locator("#railToggle")
+                    if toggle.get_attribute("aria-expanded") != "false" or rail.evaluate(
+                        "(el) => getComputedStyle(el).width"
+                    ) != "48px":
+                        failures.append("  [/] rail toggle must start collapsed at 48px")
+                    else:
+                        toggle.click()
+                        if toggle.get_attribute("aria-expanded") != "true" or rail.evaluate(
+                            "(el) => getComputedStyle(el).width"
+                        ) != "192px":
+                            failures.append("  [/] rail toggle must expand to 192px")
+                        else:
+                            toggle.click()
+                            if toggle.get_attribute("aria-expanded") != "false" or rail.evaluate(
+                                "(el) => getComputedStyle(el).width"
+                            ) != "48px":
+                                failures.append("  [/] rail toggle must collapse back to 48px")
+                    try:
+                        _check_appearance_transitions(page)
+                        print("OK  / — instant appearance swaps and animated hover at 1280px/390px")
+                    except Exception as exc:
+                        failures.append(f"  [/] appearance transitions: {exc}")
+                if path == "/#settings":
+                    try:
+                        _check_settings_appearance(page)
+                        print("OK  /#settings — System selection and safe extension skin rendering")
+                    except Exception as exc:
+                        failures.append(f"  [/#settings] appearance controls: {exc}")
                 time.sleep(1.5)
 
                 meaningful = [(kind, txt) for (kind, txt) in errors if not _is_benign(txt)]
@@ -155,7 +276,7 @@ def main():
             browser.close()
 
         if failures:
-            print("\nBROWSER SMOKE FAILED — runtime JS errors detected:", file=sys.stderr)
+            print("\nBROWSER SMOKE FAILED — browser regressions detected:", file=sys.stderr)
             print("\n".join(failures), file=sys.stderr)
             return 1
         print("\nBROWSER SMOKE PASSED — all pages loaded with zero console errors")

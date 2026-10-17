@@ -1337,7 +1337,7 @@ window._micPendingSend=window._micPendingSend||false;
 // slow/contended environments like WSL2, see #5132). Mirror the resolved value
 // into localStorage — the same synchronous-source pattern used by hermes-lang /
 // hermes-theme — so the very first send after a reload honors the saved choice.
-const _DEFAULT_MESSAGE_MODES=['queue','interrupt','steer'];
+const _DEFAULT_MESSAGE_MODES=['queue','interrupt','steer','steer_one'];
 // Legacy localStorage key (pre-#5145 rename); read it as a fallback so an
 // existing user's persisted busy-input-mode preference survives the rename.
 const _LEGACY_DEFAULT_MESSAGE_MODE_KEY='hermes-busy-input-mode';
@@ -2816,6 +2816,12 @@ function _effectiveThemeDark(baseIsDark){
 }
 
 function _setResolvedTheme(isDark){
+  // Theme/skin swap must flip every color at once: with transitions enabled the
+  // swap tweens hundreds of elements. Kill transitions for the swap frame.
+  document.documentElement.classList.add('no-transitions');
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    document.documentElement.classList.remove('no-transitions');
+  }));
   _resolvedThemeBaseDark=!!isDark;
   const effectiveDark=_effectiveThemeDark(_resolvedThemeBaseDark);
   document.documentElement.classList.toggle('dark',effectiveDark);
@@ -3918,6 +3924,50 @@ async function shutdownServer() {
   try { var bc = new BroadcastChannel('hermes-webui-shutdown'); bc.postMessage('stop'); bc.close(); } catch(_) {}
   _showServerStopped();
   try { await api('/api/shutdown', { method: 'POST' }); } catch (_) {}
+}
+
+// Restart the WebUI process in place, then reload once /health reports a new instance.
+// If chats are still running the server answers 409; we say how many and let the user
+// choose to restart anyway (force), because that interrupts those turns.
+async function restartServer() {
+  const tr = (k, fb) => { const v = typeof t === 'function' ? t(k) : k; return v && v !== k ? v : fb; };
+  const btn = $('btnRestartServer');
+  const ok = await showConfirmDialog({
+    title: tr('settings_restart_confirm_title', 'Restart Hermes WebUI'),
+    message: tr('settings_restart_confirm_message', 'Restart the Hermes WebUI server? The page will reload when it is back.'),
+    confirmLabel: tr('settings_restart_confirm_btn', 'Restart'),
+  });
+  if (!ok) return;
+  const baselineServerIdentity = await _readHealthServerIdentity();
+  // retries:0 — a lost response must not replay a destructive POST and schedule a second restart.
+  const post = (force) => api('/api/restart', { method: 'POST', body: JSON.stringify({ force }), retries: 0 });
+  if (btn) btn.disabled = true;
+  try {
+    try {
+      await post(false);
+    } catch (e) {
+      if (!e || e.status !== 409) throw e;
+      let info = {};
+      try { info = JSON.parse(e.body || '{}'); } catch (_) {}
+      const n = (Number(info.active_streams) || 0) + (Number(info.active_runs) || 0);
+      const force = await showConfirmDialog({
+        title: tr('settings_restart_busy_title', 'Chats are still running'),
+        message: tr('settings_restart_busy_message', 'Restarting now will interrupt the running chats.') + ' (' + n + ')',
+        confirmLabel: tr('settings_restart_busy_btn', 'Restart anyway'),
+        danger: true,
+        focusCancel: true,
+      });
+      if (!force) { if (btn) btn.disabled = false; return; }
+      await post(true);
+    }
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    showToast(tr('settings_restart_failed', 'Restart failed: ') + ((e && e.message) || e), 5000, 'error');
+    return;
+  }
+  showToast(tr('settings_restart_started', 'Restarting\u2026'));
+  // A cold start re-imports the agent and can exceed the 15s default used after updates.
+  _waitForServerThenReload({ baselineServerIdentity, maxMs: 60000 });
 }
 
 function _showServerStopped() {

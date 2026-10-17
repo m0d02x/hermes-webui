@@ -250,7 +250,9 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
 
 
 def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
-    script = "import yaml\nfrom run_agent import AIAgent\n"
+    # run_agent first: importing it lets Hermes Agent switch to its managed
+    # interpreter and activate its dependencies; yaml only resolves afterwards.
+    script = "from run_agent import AIAgent\nimport yaml\n"
     env = os.environ.copy()
     if agent_dir:
         # PREPEND agent_dir to PYTHONPATH so an `agent_dir/run_agent.py` wins
@@ -583,6 +585,10 @@ def main() -> int:
     os.environ.setdefault("HERMES_WEBUI_STATE_DIR", str(state_dir))
     if agent_dir:
         os.environ["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
+        # server.py imports hermes_bootstrap first, so the agent dir must be importable.
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            [str(agent_dir), *filter(None, [os.environ.get("PYTHONPATH")])]
+        )
 
     # Let operators move fallback relative writes out of a read-only agent dir.
     server_cwd = os.environ.get("HERMES_WEBUI_SERVER_CWD", "").strip() or str(agent_dir or REPO_ROOT)

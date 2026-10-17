@@ -7298,6 +7298,11 @@ function _sessionDisplayTitle(s){
   const title=strip(rawTitle);
   return title||'Untitled';
 }
+function _capitalizeSessionDisplayTitle(text){
+  const value=String(text||'');
+  if(!value) return value;
+  return value.charAt(0).toUpperCase()+value.slice(1);
+}
 
 function _sessionTitleIsDefaultWebUI(rawTitle){
   const title=String(rawTitle||'').replace(/\s+/g,' ').trim();
@@ -8208,7 +8213,7 @@ function renderSessionListFromCache(){
     }
     const title=document.createElement('span');
     title.className='session-title';
-    const displayTitle=cleanTitle||'Untitled';
+    const displayTitle=_capitalizeSessionDisplayTitle(cleanTitle||'Untitled');
     const titleMatched=Boolean(searchQueryRaw&&displayTitle.toLowerCase().includes(searchQueryRaw.toLowerCase()));
     if(titleMatched) _appendHighlightedText(title,displayTitle,searchQueryRaw,'session-search-hit');
     else title.textContent=displayTitle;
@@ -8675,7 +8680,7 @@ function renderSessionListFromCache(){
       s,
       title,
       (nextTitle)=>{
-        title.textContent=nextTitle;
+        title.textContent=_capitalizeSessionDisplayTitle(nextTitle);
         title.title=_sessionFullTitleTooltip(nextTitle,nextTitle,s);
       }
     );

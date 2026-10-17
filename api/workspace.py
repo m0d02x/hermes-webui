@@ -2084,3 +2084,53 @@ def git_info_for_workspace(workspace: Path) -> dict:
         'behind': behind,
         'is_git': True,
     }
+
+
+# Directories never worth descending into for filename search (huge, generated).
+# Dot-directories (.git, .venv, .pdfenv, ...) are also not descended into; their own
+# names still match, so '.github' is findable but its contents are not scanned.
+_SEARCH_SKIP_DIRS = frozenset({'node_modules', '__pycache__', 'venv', 'site-packages'})
+
+
+def search_files(workspace: Path, query: str, *, limit: int = 100, max_scanned: int = 20000):
+    """Case-insensitive substring search over file/dir names under *workspace*.
+
+    A query containing '/' matches against the workspace-relative path instead of
+    the bare name. Containment is inherited from :func:`list_dir`: every directory
+    is validated by ``safe_resolve_ws`` and enumerated through the anchored fd, so a
+    directory swapped for an escaping symlink mid-search fails to open and is
+    skipped. Symlinks are never returned or descended. Returns
+    ``(results, truncated)``; *truncated* is True when the result or scan cap hit.
+    """
+    from collections import deque
+
+    needle = (query or '').strip().lower()
+    if not needle:
+        return [], False
+    match_path = '/' in needle
+    results = []
+    scanned = 0
+    truncated = False
+    queue = deque(['.'])
+    while queue and not truncated:
+        rel = queue.popleft()
+        try:
+            entries = list_dir(workspace, rel, limit=max_scanned)
+        except (OSError, ValueError):
+            continue  # vanished, swapped to an escaping link, or unreadable
+        for entry in entries:
+            kind = entry.get('type')
+            if kind not in ('dir', 'file'):
+                continue
+            name = entry['name']
+            path = entry['path']
+            scanned += 1
+            if needle in (path if match_path else name).lower():
+                results.append({'name': name, 'path': path, 'type': kind})
+            if kind == 'dir' and name not in _SEARCH_SKIP_DIRS and not name.startswith('.'):
+                queue.append(path)
+            if len(results) >= limit or scanned >= max_scanned:
+                truncated = True
+                break
+    results.sort(key=lambda e: (not e['name'].lower().startswith(needle), len(e['path']), e['path']))
+    return results, truncated

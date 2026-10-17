@@ -16,7 +16,7 @@ without losing your favorite accent — pure CSS, no Python changes needed.
 
 **Settings panel:** Click the gear icon → **Appearance**. The **Theme** card
 toggles Light/Dark/System; the **Skin** grid offers the built-in accent palettes.
-Preview is instant — the UI updates as you click.
+Theme and skin changes are instant, without color transitions; normal hover feedback remains animated.
 
 **Slash command:** Type `/theme <name>` in the composer. The command accepts
 both theme names (`system`, `dark`, `light`) and skin names (`default`, `ares`,

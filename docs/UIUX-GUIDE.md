@@ -37,6 +37,10 @@ The primary layout is three-panel:
 - center panel for chat,
 - right panel for workspace file browsing and previews.
 
+The desktop primary rail starts icon-only and can expand to show its navigation
+labels. Keep the control keyboard-accessible and leave the mobile sidebar menu
+unchanged.
+
 Model, profile, workspace, attachments, voice input, context usage, Stop, and
 Send controls live in the composer footer. Settings and session-level tools live
 in the Hermes Control Center. Preserve this shape unless the change explicitly
@@ -109,6 +113,10 @@ conclusion. Treat that page as an existing proposal, not as shipped behavior
 unless the code and tests prove it is implemented.
 
 ## Typography and content
+
+Sidebar session titles display with an uppercase initial letter; the remaining
+text, including acronyms, keeps its stored capitalization and stored titles
+are never modified for display.
 
 Use three explicit font tokens:
 

@@ -1359,6 +1359,14 @@ async function send(){
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
+    const _hold=typeof _steerHold!=='undefined'&&_targetSid&&_steerHold[_targetSid]&&window._defaultMessageMode==='steer_one'?_steerHold[_targetSid]:null;
+    if(_text&&_hold&&_hold.sending){
+      _hold.held.push({text:_text,files:[...S.pendingFiles],explicit:false});
+      _clearComposerAfterQueuedSelectionSend();
+      S.pendingFiles=[];renderTray();
+      showToast(t('steer_one_held'),2000);
+      return;
+    }
     if(_text && _targetSid){
       const _modelState=_chatPayloadModelState();
       queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
@@ -1426,12 +1434,25 @@ async function send(){
         }
       }
     const defaultMessageMode=window._defaultMessageMode||'steer';
-      if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
+      if((defaultMessageMode==='steer'||defaultMessageMode==='steer_one')&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
         // _trySteer captures the owner session/files before awaiting uploads,
         // restores/persists the draft on failure, and clears the owner draft
         // only after /api/chat/steer accepts.
+        if(defaultMessageMode==='steer_one'&&typeof _steerHoldFor==='function'){
+          const _h=_steerHoldFor(S.session.session_id);
+          if(_h.sending||_h.inflight||_h.held.length){
+            _h.held.push({text,files:[...S.pendingFiles],explicit:false});
+            S.pendingFiles=[];renderTray();
+            $('msg').value='';autoResize();
+            showToast(t('steer_one_held'),2000);
+            return;
+          }
+          $('msg').value='';autoResize();
+          await _steerOneSend(S.session.session_id,text,/*explicitSteer=*/false);
+          return;
+        }
         $('msg').value='';autoResize();
         // Do NOT clear pendingFiles yet — _trySteer uploads with clearPending=false,
         // and a failed steer must keep staged files available for the user's next explicit action.
@@ -5863,6 +5884,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('tool',e=>{
       if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      if(typeof _steerOnToolStart==='function') _steerOnToolStart(activeSid);
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       _completeAutomaticCompressionOnLiveProgress(activeSid);

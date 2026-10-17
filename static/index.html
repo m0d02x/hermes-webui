@@ -153,6 +153,7 @@
 </header>
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
+    <button class="rail-btn rail-toggle has-tooltip" id="railToggle" type="button" aria-expanded="false" aria-label="Expand navigation" data-tooltip="Expand navigation" onclick="const expanded=this.getAttribute('aria-expanded')!=='true';this.setAttribute('aria-expanded',expanded);this.setAttribute('aria-label',expanded?'Collapse navigation':'Expand navigation');this.dataset.tooltip=this.getAttribute('aria-label');"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18m5-13 4 4-4 4"/></svg></button>
     <button class="rail-btn nav-tab active has-tooltip" data-panel="chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" data-hugeicon="chat" aria-hidden="true"></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" data-hugeicon="tasks" aria-hidden="true"></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban" aria-label="Kanban"><svg width="20" height="20" data-hugeicon="kanban" aria-hidden="true"></svg></button>
@@ -1075,6 +1076,11 @@
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+            <div class="settings-field" id="restartServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="settings_label_restart">Restart the Hermes WebUI server</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_restart">Reloads the WebUI server so code and configuration changes take effect. Your chats are kept on disk; the page reloads when the server is back.</div>
+              <button class="sm-btn" id="btnRestartServer" onclick="restartServer()" style="width:100%;padding:8px;font-weight:600" data-i18n="settings_btn_restart">Restart server</button>
+            </div>
             <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="settings_label_shutdown">Stop the Hermes WebUI server</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px"><span data-i18n="settings_desc_shutdown_before_cmd">Gracefully stops the local WebUI server. Useful if you launched via </span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_between_cmds"> and want to stop without switching to a terminal. You'll need to relaunch the server (</span><code>./ctl.sh start</code><span data-i18n="settings_desc_shutdown_after_cmd"> or the native app) before the WebUI is reachable again.</span></div>
@@ -1173,6 +1179,7 @@
       <span class="git-badge" id="gitBadge" style="display:none"></span>
       <div class="panel-actions">
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUpDir" data-tooltip="Parent directory" data-i18n-title="workspace_parent_directory" data-i18n-aria-label="workspace_parent_directory" aria-label="Parent directory" onclick="navigateUp()" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnSearchFiles" data-tooltip="Search files" data-i18n-title="workspace_search_files" data-i18n-aria-label="workspace_search_files" aria-label="Search files" aria-expanded="false" onclick="toggleWorkspaceSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFile" data-tooltip="New file" data-i18n-title="new_file" data-i18n-aria-label="new_file" aria-label="New file" onclick="promptNewFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFolder" data-tooltip="New folder" data-i18n-title="new_folder" data-i18n-aria-label="new_folder" aria-label="New folder" onclick="promptNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnRefreshPanel" data-tooltip="Refresh" data-i18n-title="kanban_refresh" data-i18n-aria-label="kanban_refresh" aria-label="Refresh" onclick="if(S.session)refreshWorkspacePanel()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg></button>
@@ -1187,8 +1194,12 @@
       <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false"><span data-i18n="workspace_artifacts_tab">Artifacts</span> <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
       <button class="workspace-panel-tab" id="workspaceTodosTab" type="button" onclick="switchWorkspacePanelTab('todos')" role="tab" aria-selected="false" hidden data-i18n="tab_todos">Todos</button>
     </div>
+    <div class="ws-search-bar" id="wsSearchBar" hidden>
+      <input type="search" id="wsSearchInput" class="ws-search-input" autocomplete="off" spellcheck="false" placeholder="Search files…" data-i18n-placeholder="workspace_search_placeholder" data-i18n-aria-label="workspace_search_files" aria-label="Search files" oninput="onWorkspaceSearchInput()" onkeydown="if(event.key==='Escape'){event.preventDefault();toggleWorkspaceSearch(false);}">
+    </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
+    <div class="file-tree ws-search-results" id="wsSearchResults" hidden></div>
     <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
     <div class="workspace-todos" id="workspaceTodosPanel" hidden style="flex:1;overflow-y:auto;padding:8px 12px"></div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>

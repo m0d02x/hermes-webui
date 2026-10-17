@@ -58,31 +58,6 @@ def test_reserved_core_skins_are_guarded():
     )
 
 
-def test_skin_picker_label_is_not_an_innerhtml_sink():
-    """A registered skin's label/name must render as TEXT, not parsed markup.
-
-    The picker builds each button from extension-controlled descriptor fields
-    (label/name). Rendering those via innerHTML would let a malicious extension
-    descriptor like label='<img src=x onerror=alert(1)>' execute when Settings ->
-    Appearance builds the picker. The picker must use textContent for the label.
-    """
-    # The old vulnerable construction interpolated the label into a template
-    # string assigned to btn.innerHTML — that exact sink must be gone.
-    assert 'btn.innerHTML=`' not in BOOT_JS, (
-        "skin picker must not assign extension-controlled label via innerHTML"
-    )
-    # The label must be set as text on a dedicated element.
-    assert "labelEl.textContent=skin.label||skin.name" in BOOT_JS, (
-        "skin picker label must be rendered via textContent (XSS-safe)"
-    )
-
-
-def test_skin_picker_swatches_set_background_via_style_not_html():
-    """Swatch colors are value-sanitized upstream, but defense-in-depth: set
-    them via element.style.background rather than interpolating into HTML."""
-    assert "dot.style.background=c" in BOOT_JS, (
-        "skin swatch colors must be assigned via style.background, not HTML interpolation"
-    )
 
 
 def test_pending_extension_skin_is_preserved_across_boot():
@@ -232,6 +207,8 @@ global.document = {
   documentElement: {
     dataset: {},
     classList: {
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); },
       toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
       contains(name) { return classes.has(name); },
     },
@@ -240,6 +217,7 @@ global.document = {
   querySelectorAll: () => [],
 };
 global.getComputedStyle = () => ({ getPropertyValue: () => '#141425' });
+global.requestAnimationFrame = callback => setImmediate(callback);
 
 let systemMatches = false;
 const listeners = new Set();

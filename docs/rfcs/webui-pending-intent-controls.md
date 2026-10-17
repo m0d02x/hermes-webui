@@ -109,6 +109,13 @@ Current Settings expose `Default message mode` with three choices:
 This puts Queue, Interrupt, and Steer at the same level, as if they were
 equivalent default send modes.
 
+Implementation note: the shipped setting also offers `steer_one` ("Steer one at
+a time"), an additional Steer delivery cadence. The browser sends one steer, holds
+further busy sends in memory, releases one held steer each time a new tool starts
+(the next checkpoint where upstream applies a steer), and moves anything still
+held at run end into the Queue. Ceiling: upstream has no consumed-ack, so release
+is inferred from the next tool start, and held steers do not survive a page reload.
+
 This RFC proposes replacing that with:
 
 - Queue by default

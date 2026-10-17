@@ -1658,12 +1658,50 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
   return base?`${base}\n\n${note}`:note;
 }
 
-async function _trySteer(msg, explicitSteer){
+// steer_one: per-session hold so only one steer is outstanding at a time.
+// ponytail: release is inferred from the next `tool` SSE event (no upstream
+// consumed-ack); held steers are memory-only and lost on page reload.
+// sending = a steer POST is awaiting a response; inflight = a steer was accepted
+// and we are waiting for the next tool start. Both block immediate sends.
+const _steerHold={};
+function _steerHoldFor(sid){return _steerHold[sid]||(_steerHold[sid]={sending:false,inflight:false,held:[]});}
+// Reserve `sending` before the first await so rapid sends cannot all POST.
+async function _steerOneSend(sid,text,explicit,files){
+  const h=_steerHoldFor(sid);
+  h.sending=true;
+  try{return await _trySteer(text,explicit,files);}
+  finally{h.sending=false;}
+}
+function _steerReleaseNext(sid){
+  const h=_steerHold[sid];
+  if(!h||h.sending||!h.held.length||!S.session||S.session.session_id!==sid||!S.activeStreamId) return;
+  const e=h.held.shift();
+  _steerOneSend(sid,e.text,e.explicit,e.files);
+}
+function _steerFlushHeld(sid){
+  const h=_steerHold[sid];
+  delete _steerHold[sid];
+  if(!h||!h.held.length) return;
+  const ms=_chatPayloadModelState();
+  for(const e of h.held) queueSessionMessage(sid,{text:e.text,files:e.files,model:ms.model,model_provider:ms.model_provider,profile:S.activeProfile||'default'});
+  updateQueueBadge(sid);
+  showToast(t('steer_leftover_queued'),3000);
+}
+// A tool starting proves the agent passed a checkpoint. Release whenever
+// something is held, even if the previous release failed (retry next checkpoint).
+function _steerOnToolStart(sid){
+  const h=_steerHold[sid];
+  if(!h) return;
+  h.inflight=false;
+  _steerReleaseNext(sid);
+}
+
+async function _trySteer(msg, explicitSteer, filesOverride){
   let result=null;
   const originalMsg=String(msg||'').trim();
   const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;
   const ownerStreamId=(typeof S!=='undefined'&&(S.activeStreamId||(S.session&&S.session.active_stream_id)))||null;
-  const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const pendingFilesSnapshot=Array.isArray(filesOverride)?[...filesOverride]:(typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[]);
   const ownerProfile=typeof S!=='undefined'&&(S.activeProfile||'default');
   const ownerModelState=typeof _chatPayloadModelState==='function'
     ? _chatPayloadModelState()
@@ -1711,6 +1749,7 @@ async function _trySteer(msg, explicitSteer){
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
+    _steerHoldFor(ownerSid).inflight=true;
     // The captured files+text were delivered to ownerSid — clear that session's
     // draft (it may not be the live session anymore if the user switched during
     // the upload/API await, which is fine: we're clearing the OWNER's draft).

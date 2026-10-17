@@ -11074,11 +11074,11 @@ input{width:100%;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,
 input:focus{border-color:rgba(124,185,255,.5);box-shadow:0 0 0 3px rgba(124,185,255,.1)}
 button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(124,185,255,.15);
   border:1px solid rgba(124,185,255,.3);color:#7cb9ff;font-size:14px;font-weight:600;cursor:pointer;
-  transition:all .15s}
+  transition-property:background-color;transition-duration:.15s}
 button:hover{background:rgba(124,185,255,.25)}
 .oidc-login{display:block;margin-top:10px;padding:10px;border-radius:10px;text-decoration:none;
   background:rgba(255,255,255,.04);border:1px solid rgba(111,214,164,.35);color:#6fd6a4;
-  font-size:14px;font-weight:600;cursor:pointer;transition:all .15s}
+  font-size:14px;font-weight:600;cursor:pointer;transition-property:background-color;transition-duration:.15s}
 .oidc-login:hover{background:rgba(111,214,164,.12)}
 .passkey-login{margin-top:10px;background:rgba(255,255,255,.04);border-color:rgba(232,160,48,.35);color:#e8a030}
 .err{color:#e94560;font-size:12px;margin-top:10px;display:none}
@@ -12859,6 +12859,35 @@ def _handle_shutdown(handler) -> bool:
     return True
 
 
+def _handle_restart(handler, body) -> bool:
+    """Restart the WebUI process in place (same PID, so a supervisor like PM2 is unaffected).
+
+    Refuses while chat streams/agent runs are active unless ``force`` is literally
+    ``true``, so a restart never silently kills a running turn. An unforced restart
+    re-checks idleness again right before the process is replaced.
+    """
+    from api.updates import _restart_blocker_snapshot, _schedule_restart
+
+    force = isinstance(body, dict) and body.get("force") is True
+    snapshot = _restart_blocker_snapshot()
+    if snapshot.get("restart_blocked") and not force:
+        return j(
+            handler,
+            {
+                "ok": False,
+                "restart_blocked": True,
+                "active_streams": snapshot.get("active_streams", 0),
+                "active_runs": snapshot.get("active_runs", 0),
+            },
+            status=409,
+        )
+    logger.info("[restart-request] force=%s active_streams=%s active_runs=%s",
+                force, snapshot.get("active_streams", 0), snapshot.get("active_runs", 0))
+    j(handler, {"ok": True, "status": "restarting"})
+    _schedule_restart(delay=0.5, when_busy="proceed" if force else "abort")
+    return True
+
+
 def _handle_health_restart(handler) -> bool:
     """Restart the Hermes messaging gateway service."""
     outcome = restart_active_profile_gateway()
@@ -14337,6 +14366,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/list":
         return _handle_list_dir(handler, parsed)
 
+    if parsed.path == "/api/list/search":
+        return _handle_list_search(handler, parsed)
+
     if parsed.path == "/api/escape/list":
         return _handle_escape_list_dir(handler, parsed)
 
@@ -14421,6 +14453,7 @@ def handle_get(handler, parsed) -> bool:
         polling = qs.get("poll", ["0"])[0] == "1"
         if not settings.get("check_for_updates", True) and not polling:
             return j(handler, {"disabled": True})
+        include_webui_updates = not bool(settings.get("ignore_webui_updates"))
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         # A poll carries the original job's key: the channel/Agent setting may
         # have changed in another tab mid-check, and the poll must keep asking
@@ -14464,7 +14497,7 @@ def handle_get(handler, parsed) -> bool:
         channel = qs.get("channel", [None])[0]
         if channel not in ("stable", "experimental"):
             channel = None
-        return j(handler, cached_update_status(include_agent=include_agent_updates, channel=channel))
+        return j(handler, cached_update_status(include_agent=include_agent_updates, include_webui=include_webui_updates, channel=channel))
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
@@ -15275,6 +15308,7 @@ def handle_post(handler, parsed) -> bool:
                 pass
             else:
                 return j(handler, {"disabled": True})
+        include_webui_updates = not bool(settings.get("ignore_webui_updates"))
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         force = bool(body.get("force", False))
         # Allow the client to pass the channel explicitly in the POST body. This
@@ -15288,7 +15322,7 @@ def handle_post(handler, parsed) -> bool:
             channel = settings.get("update_channel")
         from api.updates import check_for_updates
 
-        logger.info("checking for updates (force=%s, include_agent=%s, channel=%s)", force, include_agent_updates, channel)
+        logger.info("checking for updates (force=%s, include_webui=%s, include_agent=%s, channel=%s)", force, include_webui_updates, include_agent_updates, channel)
         # Defensive-only guard: wrap check_for_updates() for consistent
         # exception protection across all route handlers. Does NOT fix #6086
         # (root cause is likely signal/process-group reaping, per maintainer analysis).
@@ -15296,7 +15330,7 @@ def handle_post(handler, parsed) -> bool:
             # Bounded wait keeps the response inside reverse-proxy timeouts
             # (Cloudflare: ~100s). A slower check keeps running; the reply then
             # carries checking=True and the client polls GET ?poll=1.
-            payload = check_for_updates(force=force, include_agent=include_agent_updates, channel=channel, wait=20)
+            payload = check_for_updates(force=force, include_webui=include_webui_updates, include_agent=include_agent_updates, channel=channel, wait=20)
         except Exception:
             logger.exception("update check failed unexpectedly (defensive guard caught exception)")
             return bad(handler, "Update check failed, see server log for details", status=500)
@@ -17574,6 +17608,10 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/import":
         return _handle_session_import(handler, body)
 
+    # ── Restart WebUI process in place (POST) ──
+    if parsed.path == "/api/restart":
+        return _handle_restart(handler, body)
+
     # ── Self-update (POST) ──
     if parsed.path == "/api/updates/apply":
         target = body.get("target", "")
@@ -18205,11 +18243,16 @@ def _handle_sessions_search(handler, parsed):
     })
 
 
-def _handle_list_dir(handler, parsed):
-    qs = parse_qs(parsed.query)
-    sid = qs.get("session_id", [""])[0]
+def _resolve_list_workspace(handler, sid):
+    """Resolve the trusted workspace for /api/list and /api/list/search.
+
+    Returns ``(workspace, recovered)``, or ``None`` after the error response
+    has been sent. Raises WorkspaceBindingPersistenceError / ValueError /
+    FileNotFoundError for the caller to map to a response.
+    """
     if not sid:
-        return bad(handler, "session_id is required")
+        bad(handler, "session_id is required")
+        return None
     webui_session = None
     try:
         s = get_session(sid)
@@ -18224,38 +18267,67 @@ def _handle_list_dir(handler, parsed):
                     cli_meta = cs
                     break
             if not cli_meta:
-                return bad(handler, "Session not found", 404)
+                bad(handler, "Session not found", 404)
+                return None
             workspace = cli_meta.get("workspace", "")
         except Exception:
-            return bad(handler, "Session not found", 404)
+            bad(handler, "Session not found", 404)
+            return None
+    _list_profile = getattr(webui_session, "profile", None)
+    if webui_session is None:
+        try:
+            workspace = resolve_trusted_workspace(workspace, profile=_list_profile)
+        except TypeError:
+            workspace = resolve_trusted_workspace(workspace)
+        return workspace, False
+    stored_workspace = workspace
     try:
-        _list_profile = getattr(webui_session, "profile", None)
-        if webui_session is None:
-            try:
-                workspace = resolve_trusted_workspace(workspace, profile=_list_profile)
-            except TypeError:
-                workspace = resolve_trusted_workspace(workspace)
-            recovered = False
-        else:
-            stored_workspace = workspace
-            try:
-                workspace, recovered = resolve_implicit_workspace_with_recovery(
-                    stored_workspace,
-                    get_last_workspace,
-                    profile=_list_profile,
-                )
-            except TypeError:
-                workspace, recovered = resolve_implicit_workspace_with_recovery(
-                    stored_workspace,
-                    get_last_workspace,
-                )
-            if recovered:
-                persisted = persist_recovered_workspace_binding(
-                    webui_session,
-                    workspace,
-                    expected_workspace=stored_workspace,
-                )
-                workspace = Path(persisted.workspace)
+        workspace, recovered = resolve_implicit_workspace_with_recovery(
+            stored_workspace,
+            get_last_workspace,
+            profile=_list_profile,
+        )
+    except TypeError:
+        workspace, recovered = resolve_implicit_workspace_with_recovery(
+            stored_workspace,
+            get_last_workspace,
+        )
+    if recovered:
+        persisted = persist_recovered_workspace_binding(
+            webui_session,
+            workspace,
+            expected_workspace=stored_workspace,
+        )
+        workspace = Path(persisted.workspace)
+    return workspace, recovered
+
+
+def _handle_list_search(handler, parsed):
+    """GET /api/list/search?session_id=...&q=... — recursive filename search."""
+    from api.workspace import search_files
+
+    qs = parse_qs(parsed.query)
+    try:
+        resolved = _resolve_list_workspace(handler, qs.get("session_id", [""])[0])
+        if resolved is None:
+            return True
+        workspace, _recovered = resolved
+        query = qs.get("q", [""])[0]
+        results, truncated = search_files(Path(workspace), query)
+        return j(handler, {"results": results, "truncated": truncated, "query": query})
+    except WorkspaceBindingPersistenceError as e:
+        return bad(handler, _sanitize_error(e), 500)
+    except (FileNotFoundError, ValueError) as e:
+        return bad(handler, _sanitize_error(e), 404)
+
+
+def _handle_list_dir(handler, parsed):
+    qs = parse_qs(parsed.query)
+    try:
+        resolved = _resolve_list_workspace(handler, qs.get("session_id", [""])[0])
+        if resolved is None:
+            return True
+        workspace, recovered = resolved
         rel_path = qs.get("path", ["."])[0]
         entries = list_dir(Path(workspace), rel_path)
         return j(

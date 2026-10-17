@@ -121,3 +121,23 @@ def test_local_venv_is_created_with_symlinks(monkeypatch, tmp_path):
             pass  # expected — fake _python_can_run_webui_and_agent always returns False
 
         mock_builder.assert_called_once_with(with_pip=True, symlinks=True)
+
+
+def test_probe_imports_run_agent_before_yaml(monkeypatch, tmp_path):
+    """Agent's bootstrap relaunches into its managed interpreter on `import run_agent`;
+    importing yaml first fails there because third-party deps are not active yet."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["script"] = cmd[2]
+        seen["pythonpath"] = kwargs["env"]["PYTHONPATH"]
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+
+    assert bootstrap._python_can_run_webui_and_agent("python", tmp_path / "agent")
+    lines = seen["script"].splitlines()
+    assert lines.index("from run_agent import AIAgent") < lines.index("import yaml")
+    assert seen["pythonpath"] == str(tmp_path / "agent")
+

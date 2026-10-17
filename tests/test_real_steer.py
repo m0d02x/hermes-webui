@@ -335,7 +335,7 @@ class TestFrontendWiring:
         assert idx >= 0
         body = _source_between(cmds, "async function _trySteer(", "\nasync function cmdTitle")
         assert "const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;" in body
-        assert "const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in body
+        assert "const pendingFilesSnapshot=Array.isArray(filesOverride)?[...filesOverride]:(typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[]);" in body
         assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot)" in body
         assert "body:JSON.stringify({session_id:ownerSid,text:steerText})" in body, (
             "steer endpoint must receive the captured owner session id and attachment-enriched text"
@@ -946,6 +946,139 @@ class TestFrontendWiring:
             """
         )
         subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+    def test_steer_one_real_send_listener_and_setbusy_paths(self):
+        """steer_one through the real send(), the real SSE `tool` listener head and
+        the real setBusy(false): one POST at a time (even while a POST is pending),
+        one release per tool start, a failed release does not stall the rest, and
+        leftovers are queued at run end."""
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        steer_src = _source_between(
+            self.cmds, "function _showSteerRecovery", "\nasync function cmdTitle"
+        )
+        send_start = self.msgs.index("async function send(){")
+        send_end_marker = "}finally{ _sendInProgress=false; _sendInProgressSid=null; }\n}"
+        send_src = self.msgs[send_start : self.msgs.index(send_end_marker, send_start) + len(send_end_marker)]
+        tool_start = self.msgs.index("source.addEventListener('tool',e=>{")
+        tool_call = "_steerOnToolStart(activeSid);"
+        tool_end = self.msgs.index(tool_call, tool_start) + len(tool_call)
+        tool_src = self.msgs[tool_start:tool_end] + "\n});"
+        ui = (Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
+        busy_start = ui.index("function setBusy(v){")
+        busy_src = ui[busy_start : ui.index("\n}\n", busy_start) + 3]
+
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            function makeElement(tag){{
+              return {{tag, className:'', textContent:'', children:[], listeners:{{}},
+                appendChild(c){{this.children.push(c);}}, remove(){{}},
+                addEventListener(n,f){{this.listeners[n]=f;}}, querySelector(){{return null;}}}};
+            }}
+            const document = {{getElementById(){{return makeElement('div');}}, createElement: makeElement, querySelector(){{return null;}}}};
+            globalThis.window = globalThis;
+            window._defaultMessageMode = 'steer_one';
+            const input = {{value:''}};
+            const posts = [];
+            const queued = [];
+            let pending = null;      // deferred API response
+            let nextResult = {{accepted:true}};
+            let _sendInProgress = false;
+            let _sendInProgressSid = null;
+            const _pendingSelections = [];
+            let _terminalStateReached = false, _streamFinalized = false;
+            const activeSid = 'A', streamId = 's1';
+            function t(k){{return k;}}
+            function _steerFailureMessageKey(f){{return 'steer_fail_'+f;}}
+            function scrollToBottom(){{}}
+            function setComposerStatus(){{}}
+            function setStatus(){{}}
+            function showToast(){{}}
+            function renderTray(){{}}
+            function autoResize(){{}}
+            function updateSendBtn(){{}}
+            function _showSteerIndicator(){{}}
+            function _clearComposerDraft(){{}}
+            function _composerTextWithPendingSelections(){{return input.value;}}
+            function _clearComposerAfterQueuedSelectionSend(){{input.value='';}}
+            function _flushSelectionBlocksToComposer(){{}}
+            function _clearStaleBusyStateBeforeSend(){{}}
+            function queueSessionMessage(sid, p){{queued.push({{sid, text:p.text}});}}
+            function shiftQueuedSessionMessage(){{return null;}}
+            function updateQueueBadge(){{}}
+            function _chatPayloadModelState(){{return {{model:'m', model_provider:'p'}};}}
+            async function uploadPendingFiles(){{return [];}}
+            let _queueDrainSid = null;
+            globalThis.$ = () => input;
+            globalThis.api = (url, options) => {{
+              posts.push(JSON.parse(options.body).text);
+              if(pending) return pending.promise;
+              return Promise.resolve(nextResult);
+            }};
+            // One eval scope, like the browser's shared classic-script globals.
+            const handlers = {{}};
+            const source = {{addEventListener(n,f){{handlers[n]=f;}}}};
+            eval({json.dumps(steer_src)} + '\\n' + {json.dumps(send_src)} + '\\n' + {json.dumps(busy_src)} + '\\n' + {json.dumps(tool_src)} + '\\nglobalThis.__hold = _steerHold; globalThis.send = send; globalThis.setBusy = setBusy;');
+            const tick = () => new Promise(r => setTimeout(r, 0));
+            const typeAndSend = (text) => {{ input.value = text; return send(); }};
+
+            (async () => {{
+              globalThis.S = {{session:{{session_id:'A', active_stream_id:'s1'}}, activeStreamId:'s1', busy:true, pendingFiles:[]}};
+
+              // 1. POST for A1 still pending: B1/C1 sent rapidly must be held, not POSTed.
+              let d; pending = {{promise:new Promise(r => {{ d = r; }})}};
+              const first = typeAndSend('A1');
+              await tick();
+              await typeAndSend('B1'); await typeAndSend('C1');
+              assert.deepStrictEqual(posts, ['A1']);
+              assert.deepStrictEqual(__hold['A'].held.map(e => e.text), ['B1', 'C1']);
+              assert.deepStrictEqual(queued, []);
+              pending = null; d({{accepted:true}}); await first;
+              assert.strictEqual(__hold['A'].inflight, true);
+
+              // 2. Next send while inflight is held too.
+              await typeAndSend('D1');
+              assert.deepStrictEqual(posts, ['A1']);
+
+              // 3. Tool start releases exactly one; a rejected release must not stall the rest.
+              nextResult = {{accepted:false, fallback:'no_cached_agent'}};
+              handlers.tool({{data:'{{}}'}}); await tick(); await tick();
+              assert.deepStrictEqual(posts, ['A1', 'B1']);
+              assert.strictEqual(__hold['A'].inflight, false);
+              assert.deepStrictEqual(__hold['A'].held.map(e => e.text), ['C1', 'D1']);
+              nextResult = {{accepted:true}};
+              handlers.tool({{data:'{{}}'}}); await tick(); await tick();
+              assert.deepStrictEqual(posts, ['A1', 'B1', 'C1']);
+              handlers.tool({{data:'{{}}'}}); await tick(); await tick();
+              assert.deepStrictEqual(posts, ['A1', 'B1', 'C1', 'D1']);
+
+              // 4. Tool events for another stream/session never release.
+              await typeAndSend('E1');
+              S.session.session_id = 'B';
+              handlers.tool({{data:'{{}}'}}); await tick();
+              S.session.session_id = 'A';
+              assert.deepStrictEqual(posts, ['A1', 'B1', 'C1', 'D1']);
+
+              // 5. Run end through the real setBusy(false): leftovers queued, no POST.
+              _queueDrainSid = 'A';
+              setBusy(false);
+              assert.deepStrictEqual(queued, [{{sid:'A', text:'E1'}}]);
+              assert.strictEqual(__hold['A'], undefined);
+              assert.deepStrictEqual(posts, ['A1', 'B1', 'C1', 'D1']);
+            }})().catch(e => {{ console.error(e); process.exit(1); }});
+            """
+        )
+        r = subprocess.run([node, "-e", script], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
 
     def test_pending_steer_leftover_listener(self):
         """Frontend must listen for pending_steer_leftover SSE events and queue them."""

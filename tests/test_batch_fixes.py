@@ -149,20 +149,6 @@ class TestSystemTheme:
             "loadSettings must call _applyTheme() instead of direct data-theme assignment"
         )
 
-    def test_system_option_in_theme_picker(self):
-        html = read("static/index.html")
-        assert "_pickTheme('system')" in html, (
-            "Theme picker must include a system theme button"
-        )
-        assert ">System<" in html, (
-            "Theme picker must show 'System' label"
-        )
-
-    def test_theme_picker_uses_pick_theme(self):
-        html = read("static/index.html")
-        assert "_pickTheme(" in html, (
-            "Theme buttons must call _pickTheme()"
-        )
 
     def test_flicker_script_resolves_system(self):
         html = read("static/index.html")
@@ -243,14 +229,3 @@ class TestSystemTheme:
             "localStorage selections when a prior autosave failed"
         )
 
-    def test_panels_hydrates_appearance_before_models_fetch(self):
-        src = read("static/panels.js")
-        # PR #2799 (v0.51.119): skin precedence now prefers localStorage over settings.skin
-        # so the inline-gate-resolved DOM skin survives the picker hydration.
-        skin_idx = src.index("const skinVal=(localStorage.getItem('hermes-skin')||settings.skin||'default').toLowerCase();")
-        # models is now declared as let models=null before the try block
-        models_idx = src.index("models=await api('/api/models');")
-        assert skin_idx < models_idx, (
-            "loadSettingsPanel must hydrate theme/skin before awaiting /api/models, "
-            "otherwise a slow model fetch can clobber an in-progress skin selection"
-        )

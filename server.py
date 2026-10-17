@@ -1,4 +1,14 @@
 """Hermes Web UI server entry point."""
+import os as _os, sys as _sys
+# A relaunch into the agent's managed interpreter runs with -I, which drops the script dir.
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# Hermes Agent must be imported before any third-party module so it can move this
+# process onto its managed interpreter/dependencies (agent dir arrives via PYTHONPATH).
+try:
+    import hermes_bootstrap  # noqa: F401
+except ModuleNotFoundError as _exc:
+    if _exc.name != "hermes_bootstrap":
+        raise
 import logging
 import os
 import re

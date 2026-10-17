@@ -8351,7 +8351,7 @@ function getComposerPrimaryAction(){
   const explicitAction=_getExplicitBusyCommandAction(msg&&msg.value);
   if(explicitAction) return explicitAction;
   const defaultMessageMode=window._defaultMessageMode||'steer';
-  if(defaultMessageMode==='steer'){
+  if(defaultMessageMode==='steer'||defaultMessageMode==='steer_one'){
     if(S.activeStreamId&&typeof _trySteer==='function') return 'steer';
     return 'queue';
   }
@@ -8376,12 +8376,12 @@ function _applyBusyComposerPlaceholder(){
   const busyMode=window._defaultMessageMode||'steer';
   const busyPlaceholderKey=busyMode==='interrupt'
     ? 'composer_placeholder_busy_interrupt'
-    : busyMode==='steer'
+    : (busyMode==='steer'||busyMode==='steer_one')
       ? 'composer_placeholder_busy_steer'
       : 'composer_placeholder_busy_queue';
   const busyPlaceholderFallback=busyMode==='interrupt'
     ? 'Enter = interrupt | /queue | /background | /steer'
-    : busyMode==='steer'
+    : (busyMode==='steer'||busyMode==='steer_one')
       ? 'Enter = steer | /queue | /background | /interrupt'
       : 'Enter = queue | /interrupt | /background | /steer';
   input.placeholder=typeof t==='function'
@@ -8468,6 +8468,9 @@ function setBusy(v){
     setComposerStatus('');
     const sid=_queueDrainSid||(S.session&&S.session.session_id);
     _queueDrainSid=null;
+    // steer_one: held steers not consumed by run end become queued next-turn
+    // messages (FIFO behind earlier queued ones). Covers done/cancel/error.
+    if(sid&&typeof _steerFlushHeld==='function') _steerFlushHeld(sid);
     updateQueueBadge(sid);
     // Drain one queued message for the finished session after UI settles
     const _isViewedSid=!S.session||sid===S.session.session_id;

@@ -108,7 +108,7 @@ class TestSyncMirrorHelpers:
     def test_normalize_validates_against_known_modes(self):
         """Unknown/garbage persisted values must normalize to the safe default, never crash."""
         assert "function _normalizeDefaultMessageMode(" in BOOT_JS
-        assert "['queue','interrupt','steer']" in BOOT_JS
+        assert "['queue','interrupt','steer','steer_one']" in BOOT_JS
 
     def test_localstorage_access_is_guarded(self):
         """localStorage can throw (privacy mode / disabled). Helpers must try/catch."""

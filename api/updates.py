@@ -38,7 +38,7 @@ try:
 except ImportError:
     _AGENT_DIR = None
 
-_update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'channel': 'stable'}
+_update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True, 'include_webui': True, 'channel': 'stable'}
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
@@ -786,13 +786,26 @@ def channel_version_badge(channel=None) -> str:
     return WEBUI_VERSION
 
 
-def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):
-    """Return the channel's release tags newest-first, in version-sort order."""
+def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL, target=None):
+    """Return the channel's release tags newest-first.
+
+    Prerelease and build-metadata tags (``v0.21.7-rc.1``, ``v0.21.5+canary.…``)
+    are never offered as stable releases. For the Agent, legacy calendar tags
+    (``v2026.9.24``) are dropped whenever semver tags exist: version order would
+    otherwise rank them above the new releases.
+    """
     glob = _channel_tag_glob(channel)
     out, ok = _run_git(['tag', '--list', glob, '--sort=-v:refname'], path)
     if not (ok and out):
         return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    tags = [line.strip() for line in out.splitlines() if line.strip()]
+    if channel == 'stable':
+        tags = [t for t in tags if _is_stable_release_tag(t) and '+' not in t]
+    if target == 'agent':
+        semver = [t for t in tags if not _is_calendar_tag(t)]
+        if semver:
+            tags = semver
+    return tags
 
 
 def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
@@ -856,6 +869,12 @@ def _is_stable_release_tag(tag):
     """Return True for stable release tags and False for prerelease tags."""
     raw = str(tag or '').strip()
     return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
+
+
+def _is_calendar_tag(tag):
+    """Return True for legacy calendar tags (``v2026.9.24``): leading component >= 2000."""
+    m = re.match(r'v(\d+)\.', str(tag or ''))
+    return bool(m and int(m.group(1)) >= 2000)
 
 
 def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100', *, timeout=3.0):
@@ -1006,7 +1025,7 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     """
     channel = _normalize_channel(channel)
     suppress_stable_fallthrough = (channel == 'stable' and target == 'webui')
-    tags = _release_tags(path, channel)
+    tags = _release_tags(path, channel, target)
     if tags:
         latest_tag = tags[0]
         current_tag = _current_release_tag(path, channel)
@@ -1069,7 +1088,7 @@ def _channel_up_to_date_info(path, name, channel, current_tag):
 def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """Check if a git repo is behind its latest published channel release tag."""
     channel = _normalize_channel(channel)
-    tags = _release_tags(path, channel)
+    tags = _release_tags(path, channel, name)
     if not tags:
         return None
 
@@ -1352,19 +1371,30 @@ def _ignored_agent_update_info() -> dict:
     return {'name': 'agent', 'behind': 0, 'ignored': True}
 
 
-def cached_update_status(*, include_agent=True, channel=None):
+def _ignored_webui_update_info() -> dict:
+    """Return a stable update-check payload for intentionally ignored WebUI updates."""
+    return {'name': 'webui', 'behind': 0, 'ignored': True}
+
+
+def cached_update_status(*, include_agent=True, include_webui=True, channel=None):
     """Return cached update status without performing network or git mutations."""
     include_agent = bool(include_agent)
+    include_webui = bool(include_webui)
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
+    key = (channel, include_agent)
     with _cache_lock:
-        job = _check_jobs.get((channel, include_agent))
+        job = _check_jobs.get(key)
         checking = job is not None and job['thread'].is_alive()
         cached = dict(_update_cache)
         # A check for another key may have overwritten the shared cache since
         # this key's job finished; that job's own result is then the answer.
-        cache_matches = cached.get('channel') == channel and cached.get('include_agent') == include_agent
+        cache_matches = (
+            cached.get('channel') == channel
+            and cached.get('include_agent') == include_agent
+            and cached.get('include_webui') == include_webui
+        )
         if not cache_matches and job is not None and not checking and job['result'] is not None:
             cached = dict(job['result'])
     # If the cache was populated for a different channel, it is not a valid
@@ -1373,6 +1403,10 @@ def cached_update_status(*, include_agent=True, channel=None):
     if cached.get('channel') != channel:
         cached['channel'] = channel
         cached['stale_channel'] = True
+    if cached.get('include_webui') != include_webui:
+        cached['include_webui'] = include_webui
+        if not include_webui:
+            cached['webui'] = _ignored_webui_update_info()
     if cached.get('include_agent') != include_agent:
         cached['include_agent'] = include_agent
         if not include_agent:
@@ -1384,12 +1418,12 @@ def cached_update_status(*, include_agent=True, channel=None):
     return cached
 
 
-def _run_update_check(job, include_agent, channel):
+def _run_update_check(job, include_agent, include_webui, channel):
     # Serialize checks: two jobs (e.g. stable and experimental) must not run
     # concurrent git fetches against the same checkouts.
     with _check_run_lock:
         try:
-            webui_info = _check_repo(REPO_ROOT, 'webui', channel)
+            webui_info = _check_repo(REPO_ROOT, 'webui', channel) if include_webui else _ignored_webui_update_info()
             # The update channel is a WebUI-only concept. The Agent is a separate
             # project that tags plain v* and legitimately tracks master past its
             # tags; it must ALWAYS use the default channel regardless of the user's
@@ -1401,6 +1435,7 @@ def _run_update_check(job, include_agent, channel):
                 _update_cache['agent'] = agent_info
                 _update_cache['checked_at'] = time.time()
                 _update_cache['include_agent'] = include_agent
+                _update_cache['include_webui'] = include_webui
                 _update_cache['channel'] = channel
                 job['result'] = dict(_update_cache)
         except Exception as exc:
@@ -1408,17 +1443,18 @@ def _run_update_check(job, include_agent, channel):
             job['error'] = exc
 
 
-def check_for_updates(force=False, *, include_agent=True, channel=None, wait=None):
+def check_for_updates(force=False, *, include_agent=True, include_webui=True, channel=None, wait=None):
     """Return update status for webui and agent repos, refreshing it if stale.
 
-    The refresh runs in a background job keyed by ``(channel, include_agent)``
-    so a slow fetch (a checkout far behind upstream) can finish even when the
-    HTTP request cannot wait for it. ``wait`` bounds how long this call blocks
-    (None = until done). If the job is still running, the result carries
-    ``checking: True``; callers poll ``cached_update_status()`` for the same
-    key until ``checking`` clears.
+    The refresh runs in a background job keyed by ``(channel, include_agent,
+    include_webui)`` so a slow fetch (a checkout far behind upstream) can finish
+    even when the HTTP request cannot wait for it. ``wait`` bounds how long this
+    call blocks (None = until done). If the job is still running, the result
+    carries ``checking: True``; callers poll ``cached_update_status()`` for the
+    same key until ``checking`` clears.
     """
     include_agent = bool(include_agent)
+    include_webui = bool(include_webui)
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
@@ -1430,6 +1466,7 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
         # with a stale cross-channel payload (Codex SILENT #5).
         cache_matches = (
             _update_cache.get('include_agent') == include_agent
+            and _update_cache.get('include_webui') == include_webui
             and _update_cache.get('channel') == channel
         )
         job = _check_jobs.get(key)
@@ -1446,7 +1483,7 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
             job = {'result': None, 'error': None}
             job['thread'] = threading.Thread(
                 target=_run_update_check,
-                args=(job, include_agent, channel),
+                args=(job, include_agent, include_webui, channel),
                 name=f'update-check-{channel}',
                 daemon=True,
             )
@@ -1455,7 +1492,7 @@ def check_for_updates(force=False, *, include_agent=True, channel=None, wait=Non
 
     job['thread'].join(wait)
     if job['thread'].is_alive():
-        return cached_update_status(include_agent=include_agent, channel=channel)
+        return cached_update_status(include_agent=include_agent, include_webui=include_webui, channel=channel)
     if job['error'] is not None:
         raise job['error']
     return dict(job['result'])
@@ -1785,7 +1822,7 @@ def _purge_agent_pycache(repo_dir: Path) -> None:
         pass
 
 
-def _schedule_restart(delay: float = 2.0) -> None:
+def _schedule_restart(delay: float = 2.0, *, when_busy: str = 'wait') -> None:
     """Re-exec this process after *delay* seconds.
 
     Called after a successful update so that the freshly-pulled code is
@@ -1820,7 +1857,15 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # Threads die when execv replaces the process image, so the lock is
         # released atomically by the kernel.
         with _apply_lock:
-            _wait_until_restart_safe()
+            if when_busy == 'abort':
+                # Unforced manual restart: re-check at the point of use, with the lock
+                # held, so a chat that started after the caller's snapshot is never killed.
+                snapshot = _restart_blocker_snapshot()
+                if snapshot.get('restart_blocked'):
+                    logger.warning("restart aborted: work started after the request (%s)", snapshot)
+                    return
+            elif when_busy == 'wait':
+                _wait_until_restart_safe()
             # Purge bytecode caches so the new process imports from
             # current source.  Without this, Python may serve stale .pyc
             # files whose mtime matches the just-pulled .py files,
