@@ -84,3 +84,13 @@ docs/ui-ux/review-shots/
 # Local WebUI runtime data and credentials
 .webui_password
 attachments/
+
+# Local tooling and private deploy files (contain credentials)
+.codegraph/
+Dockerfile.dashboard
+Dockerfile.local
+Dockerfile.selfcontained
+Dockerfile.v[0-9]*
+docker-compose.local.yml
+startup.sh
+update-base.sh
