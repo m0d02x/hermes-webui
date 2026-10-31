@@ -209,7 +209,7 @@ def test_api_has_default_timeout_and_per_call_override_contract():
 
 
 def test_update_flows_keep_explicit_longer_timeouts():
-    """Update checks poll a background check; apply/force keep a 120s budget."""
+    """Update checks poll a background check; apply is a polled job; force keeps a 120s budget."""
     boot = _source(BOOT_JS)
     src = _source(UI_JS)
     panels = _source(PANELS_JS)
@@ -219,9 +219,9 @@ def test_update_flows_keep_explicit_longer_timeouts():
     assert "await _runUpdateCheck(_checkBody)" in panels
     assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(body),timeoutMs:60000})" in src
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
-    # apply/force now build their body inline to optionally carry the offered
-    # channel (Codex debounce-race fix), but MUST still carry the 120s override.
-    assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000})" in src
+    # apply starts a server-side job and polls it (no long-held request); force
+    # builds its body inline to carry the offered channel and keeps 120s.
+    assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(body),timeoutMs:30000})" in src
     assert "api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000})" in src
 
 

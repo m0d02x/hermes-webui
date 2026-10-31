@@ -2229,13 +2229,13 @@ global.fetch = async () => {{
         assert '_readHealthServerIdentity()' in force_body, (
             "forceUpdate() must call _readHealthServerIdentity() before reload wait"
         )
-        assert '_waitForServerThenReload({baselineServerIdentity})' in apply_body, (
+        assert '_waitForServerThenReload({baselineServerIdentity,maxMs:180000})' in apply_body, (
             "applyUpdates() must pass baselineServerIdentity to _waitForServerThenReload()"
         )
         assert '_waitForServerThenReload({baselineServerIdentity})' in force_body, (
             "forceUpdate() must pass baselineServerIdentity to _waitForServerThenReload()"
         )
-        assert apply_body.index('_readHealthServerIdentity()') < apply_body.index('_waitForServerThenReload({baselineServerIdentity})'), (
+        assert apply_body.index('_readHealthServerIdentity()') < apply_body.index('_waitForServerThenReload({baselineServerIdentity,maxMs:180000})'), (
             "applyUpdates() must capture baseline before reload scheduling"
         )
         assert force_body.index('_readHealthServerIdentity()') < force_body.index("const res=await api('/api/updates/force'"), (

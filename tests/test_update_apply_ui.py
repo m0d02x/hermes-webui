@@ -45,6 +45,7 @@ const showToasts = [];
 const apiCalls = [];
 const waitCalls = [];
 const errors = [];
+const progressCalls = [];
 let readHealthCalls = 0;
 
 function $(id) { return dom[id] || null; }
@@ -66,6 +67,10 @@ function _waitForServerThenReload(opts) {
   });
 }
 function _showUpdateError(target, res) { errors.push({ target, message: res.message || '' }); }
+function _setUpdateProgress(show, title) { progressCalls.push({ show, title: title || null, apiCallsSoFar: apiCalls.length }); }
+async function _applyUpdateJob(body) {
+  return api('/api/updates/apply', { body: JSON.stringify(body) });
+}
 function _formatUpdateApplyExceptionMessage(e) { return 'Update failed: ' + e.message; }
 function showToast(message, duration, kind) {
   showToasts.push({ message, duration, kind });
@@ -80,6 +85,8 @@ global.api = api;
 global._readHealthServerIdentity = _readHealthServerIdentity;
 global._waitForServerThenReload = _waitForServerThenReload;
 global._showUpdateError = _showUpdateError;
+global._setUpdateProgress = _setUpdateProgress;
+global._applyUpdateJob = _applyUpdateJob;
 global._formatUpdateApplyExceptionMessage = _formatUpdateApplyExceptionMessage;
 global.showToast = showToast;
 global.setTimeout = setTimeout;
@@ -94,6 +101,7 @@ eval(snippet);
     waitCalls,
     errors,
     showToasts,
+    progressCalls,
     errorDisplay: errorEl.style.display,
     errorText: errorEl.textContent,
     removedKeys: sessionStorage.removed,
@@ -235,3 +243,21 @@ def test_apply_updates_wait_for_all_targets_before_reload():
     assert result["apiCalls"] == ["agent", "webui"]
     assert result["waitCalls"] == []
     assert result["errors"] == [{"target": "webui", "message": "webui failed"}]
+
+
+def test_apply_updates_modal_shown_before_apply_request():
+    result = _run_apply_updates_harness({"agent": {"behind": 1}}, [{"ok": True}])
+    first = result["progressCalls"][0]
+    assert first["show"] is True and first["apiCallsSoFar"] == 0
+    # success keeps the modal up (switches to Restarting) until the reload
+    assert result["progressCalls"][-1]["show"] is True
+    assert result["progressCalls"][-1]["title"] == "Restarting\u2026"
+
+
+def test_apply_updates_modal_hidden_when_update_fails():
+    result = _run_apply_updates_harness(
+        {"agent": {"behind": 1}}, [{"ok": False, "message": "boom"}]
+    )
+    assert result["progressCalls"][0]["show"] is True
+    assert result["progressCalls"][-1]["show"] is False
+    assert result["errors"] == [{"target": "agent", "message": "boom"}]

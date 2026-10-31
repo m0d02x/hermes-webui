@@ -14445,6 +14445,14 @@ def handle_get(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, str(e), 503)
 
+    if parsed.path == "/api/updates/apply_status":
+        from api.updates import get_apply_job
+
+        job = get_apply_job(parse_qs(parsed.query).get("job_id", [""])[0])
+        if job is None:
+            return bad(handler, "unknown update job", 404)
+        return j(handler, job)
+
     if parsed.path == "/api/updates/check":
         settings = load_settings()
         qs = parse_qs(parsed.query)
@@ -17624,9 +17632,9 @@ def handle_post(handler, parsed) -> bool:
         _apply_channel = body.get("channel") if isinstance(body, dict) else None
         if _apply_channel not in ("stable", "experimental"):
             _apply_channel = None
-        from api.updates import apply_update
+        from api.updates import start_apply_job
 
-        return j(handler, apply_update(target, _apply_channel))
+        return j(handler, {"ok": True, "started": True, "job_id": start_apply_job(target, _apply_channel)})
 
     if parsed.path == "/api/updates/force":
         target = body.get("target", "")

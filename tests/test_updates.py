@@ -287,6 +287,69 @@ def test_apply_update_fetch_failure_reports_local_diagnostic(tmp_path):
     }
 
 
+def test_apply_update_pull_timeout_after_fast_forward_is_success(tmp_path):
+    """git can land the fast-forward and still time out; HEAD == target means success."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args[0] == 'fetch':
+            return '', True
+        if args[:2] == ['status', '--porcelain']:
+            return '', True
+        if args[0] == 'pull':
+            return 'git pull --ff-only origin v1 timed out after 60s', False
+        if args == ['rev-parse', 'HEAD'] or args == ['rev-parse', 'v1^{commit}']:
+            return 'abc123', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    restart = MagicMock()
+    with patch.object(updates, '_run_git', side_effect=fake_git), \
+         patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_select_apply_compare_ref', return_value='v1'), \
+         patch.object(updates, '_schedule_restart', restart), \
+         patch.object(updates, '_restart_blocker_snapshot', return_value={'restart_blocked': False, 'active_streams': 0, 'active_runs': 0}):
+        result = updates.apply_update('webui')
+
+    assert result['ok'] is True
+    restart.assert_called_once()
+
+
+def _wait_job(job_id, timeout=5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = updates.get_apply_job(job_id)
+        if job['done']:
+            return job
+        time.sleep(0.01)
+    raise AssertionError('apply job never finished')
+
+
+def test_apply_job_runs_in_background_and_reports_result():
+    release = __import__('threading').Event()
+
+    def slow_apply(target, channel=None):
+        release.wait(5)
+        return {'ok': True, 'message': f'{target} updated'}
+
+    with patch.object(updates, 'apply_update', side_effect=slow_apply):
+        job_id = updates.start_apply_job('agent')
+        assert updates.get_apply_job(job_id) == {'done': False, 'result': None}
+        release.set()
+        job = _wait_job(job_id)
+    assert job == {'done': True, 'result': {'ok': True, 'message': 'agent updated'}}
+
+
+def test_apply_job_turns_a_crash_into_a_failed_result_without_leaking_details():
+    with patch.object(updates, 'apply_update', side_effect=RuntimeError('secret ghp_xxx')):
+        job = _wait_job(updates.start_apply_job('agent'))
+    assert job['result']['ok'] is False
+    assert 'secret' not in job['result']['message']
+
+
+def test_apply_job_unknown_id_is_none():
+    assert updates.get_apply_job('nope') is None
+
+
 def test_apply_fetch_failure_keeps_connectivity_guidance_for_network_errors(tmp_path):
     """Known network fetch failures should keep the connectivity guidance."""
     (tmp_path / '.git').mkdir()
@@ -308,6 +371,19 @@ def test_apply_fetch_failure_keeps_connectivity_guidance_for_network_errors(tmp_
             result = apply_fn('webui')
 
         assert result == {'ok': False, 'message': expected_message}
+
+
+def test_run_git_timeout_returns_text_even_when_partial_output_is_bytes(tmp_path, monkeypatch):
+    """TimeoutExpired carries bytes even with text=True; callers do str ops on it."""
+    def timeout_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 30, output=b'', stderr=b'From github.com:o/r\n')
+
+    monkeypatch.setattr(updates.subprocess, 'run', timeout_run)
+    out, ok = updates._run_git(['pull', '--ff-only', 'origin', 'v1'], tmp_path, timeout=30)
+
+    assert ok is False
+    assert out == 'From github.com:o/r'
+    assert updates._is_git_lock_error(out) is False
 
 
 def test_apply_fetch_failure_keeps_connectivity_guidance_for_timeout_shape(tmp_path):

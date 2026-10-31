@@ -10544,12 +10544,40 @@ function _formatUpdateApplyExceptionMessage(error){
   const message=(error&&error.message)||String(error||'unknown error');
   return _i18nUpdateText('update_failed_prefix','Update failed: ')+message;
 }
+function _setUpdateProgress(show,title,desc){
+  const o=$('updateProgressOverlay');
+  if(!o) return;
+  if(title) $('updateProgressTitle').textContent=title;
+  if(desc) $('updateProgressDesc').textContent=desc;
+  o.style.display=show?'flex':'none';
+  o.setAttribute('aria-hidden',show?'false':'true');
+}
+// Apply runs as a server-side job (a pull can outlive any proxy timeout): start
+// it, then poll. A failed poll means the server is restarting for the update
+// (or went away); return {restarting:true} so the caller hands off to the
+// reload wait instead of reporting a failure.
+async function _applyUpdateJob(body){
+  const start=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(body),timeoutMs:30000});
+  if(!start.job_id) return start;
+  const deadline=Date.now()+15*60*1000;
+  let failedPolls=0;
+  while(Date.now()<deadline){
+    await new Promise(r=>setTimeout(r,2000));
+    let st;
+    try{ st=await api('/api/updates/apply_status?job_id='+encodeURIComponent(start.job_id),{timeoutMs:15000}); }
+    catch(e){ if(++failedPolls>=3) return {ok:true,restarting:true}; continue; }
+    failedPolls=0;
+    if(st.done) return st.result;
+  }
+  throw new Error('Update is still running after 15 minutes; check the server.');
+}
 async function applyUpdates(){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
   const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
+    _setUpdateProgress(false);
     const reset=()=>{
       window._updateApplyInFlight=false;
       if(btn){btn.disabled=false;btn.textContent=updateText('update_now','Update Now');}
@@ -10558,6 +10586,7 @@ async function applyUpdates(){
     else reset();
   };
   if(btn){btn.disabled=true;btn.textContent=updateText('update_updating','Updating\u2026');}
+  _setUpdateProgress(true,updateText('update_progress_title','Updating\u2026'),updateText('update_progress_desc','Downloading the update. This can take a few minutes. Keep this page open; it will restart and reload automatically.'));
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
   // Hide any leftover force-update button from a prior conflict so a fresh
@@ -10586,7 +10615,7 @@ async function applyUpdates(){
       const _applyBody={target};
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
+      const res=await _applyUpdateJob(_applyBody);
       if(!res.ok){
         _showUpdateError(target,res);
         resetApplyButton(0);
@@ -10601,7 +10630,8 @@ async function applyUpdates(){
     showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload({baselineServerIdentity});
+    _setUpdateProgress(true,updateText('update_restarting_title','Restarting\u2026'),updateText('update_restarting_desc','Update installed. Restarting the server; this page will reload automatically.'));
+    _waitForServerThenReload({baselineServerIdentity,maxMs:180000});
   }catch(e){
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -10926,6 +10956,7 @@ async function _waitForServerThenReload(opts){
     }catch(_){ _consecutiveOutages++; /* socket closed during restart — retry */ }
     await new Promise(r=>setTimeout(r, interval));
   }
+  _setUpdateProgress(false);
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 

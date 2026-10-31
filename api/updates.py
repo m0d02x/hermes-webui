@@ -259,7 +259,11 @@ def _run_git(args, cwd, timeout=10):
             return stdout, True
         return stderr or stdout or f"git exited with status {r.returncode}", False
     except subprocess.TimeoutExpired as exc:
-        detail = (getattr(exc, 'stderr', None) or getattr(exc, 'stdout', None) or '').strip()
+        # TimeoutExpired keeps partial output as bytes even with text=True.
+        detail = next((v for v in (exc.stderr, exc.stdout) if v), '')
+        if isinstance(detail, bytes):
+            detail = detail.decode('utf-8', errors='replace')
+        detail = detail.strip()
         return detail or f"git {' '.join(args)} timed out after {timeout}s", False
     except FileNotFoundError:
         return 'git executable not found', False
@@ -275,6 +279,9 @@ def _run_git(args, cwd, timeout=10):
 # fetch is incremental, and they must fit the client's 120s request budget.
 _GIT_FETCH_TIMEOUT = 120
 _APPLY_FETCH_TIMEOUT = 15
+# Apply's pull can be slow (big checkout, slow disk); only give up after 5 min.
+# The client waits a little longer (static/ui.js applyUpdates timeoutMs).
+_APPLY_PULL_TIMEOUT = 300
 
 
 def _is_git_lock_error(output: str) -> bool:
@@ -282,6 +289,12 @@ def _is_git_lock_error(output: str) -> bool:
         return False
     lower_out = output.lower()
     return any(sig in lower_out for sig in _GIT_LOCK_SIGNATURES)
+
+
+def _head_is_at(path, ref) -> bool:
+    head, head_ok = _run_git(['rev-parse', 'HEAD'], path)
+    target, target_ok = _run_git(['rev-parse', f'{ref}^{{commit}}'], path)
+    return bool(head) and head_ok and target_ok and head == target
 
 
 def _inventory_locks(path: Path) -> dict:
@@ -2174,6 +2187,44 @@ def apply_update(target, channel=None):
         _apply_lock.release()
 
 
+_apply_jobs = {}  # job_id -> {'done': bool, 'result': dict|None}; newest last
+_apply_jobs_lock = threading.Lock()
+
+
+def start_apply_job(target, channel=None):
+    """Run apply_update in a thread so a slow pull never rides one HTTP request.
+
+    Proxies cut long requests (~100s) and a retry would then hit "already in
+    progress"; the client polls get_apply_job instead.
+    """
+    import uuid
+    job_id = uuid.uuid4().hex
+    job = {'done': False, 'result': None}
+    with _apply_jobs_lock:
+        _apply_jobs[job_id] = job
+        while len(_apply_jobs) > 10:
+            _apply_jobs.pop(next(iter(_apply_jobs)))
+
+    def run():
+        try:
+            result = apply_update(target, channel)
+        except Exception as exc:
+            logger.exception('apply_update(%s) crashed', target)
+            result = {'ok': False, 'message': f'Update failed unexpectedly: {type(exc).__name__}'}
+        job['result'] = result
+        job['done'] = True
+
+    threading.Thread(target=run, name=f'apply-update-{target}', daemon=True).start()
+    return job_id
+
+
+def get_apply_job(job_id):
+    """Return {'done': bool, 'result': dict|None}, or None for an unknown id."""
+    with _apply_jobs_lock:
+        job = _apply_jobs.get(job_id)
+        return dict(job) if job else None
+
+
 def _restore_stash_after_pull_failure(
     target: str,
     path: Path,
@@ -2227,7 +2278,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
 
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=_APPLY_FETCH_TIMEOUT)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=_APPLY_PULL_TIMEOUT)
     if not fetch_ok:
         if _is_git_lock_error(fetch_out):
             return {
@@ -2299,7 +2350,11 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         pull_args.extend([remote, branch])
     else:
         pull_args.extend(['origin', compare_ref])
-    pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
+    pull_out, pull_ok = _run_git(pull_args, path, timeout=_APPLY_PULL_TIMEOUT)
+    if not pull_ok and not _is_git_lock_error(pull_out) and _head_is_at(path, compare_ref):
+        # git can fast-forward and still outlive its timeout (slow checkout);
+        # the update landed, so continue to the restart steps.
+        pull_ok = True
     if not pull_ok:
         if _is_git_lock_error(pull_out):
             # Lock conflict during pull. If a stash was pushed for the local
