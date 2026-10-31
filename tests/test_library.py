@@ -708,7 +708,7 @@ def test_react_library_mention_preserves_draft_when_navigation_changes_it():
         assert.equal(insertions.length,1);
       })().catch(error=>{console.error(error);process.exit(1);});
     """).replace("__HOST__", json.dumps(host_js))
-    subprocess.run([NODE, "-e", script], check=True, capture_output=True, text=True, timeout=15)
+    subprocess.run([NODE, "-"], input=script, check=True, capture_output=True, text=True, timeout=15)
 
 def _run_commands_js(body: str, extra_context: str = "") -> dict:
     commands = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
@@ -720,7 +720,7 @@ def _run_commands_js(body: str, extra_context: str = "") -> dict:
       vm.createContext(ctx);vm.runInContext({json.dumps(commands)},ctx);
       (async()=>{{const result=await vm.runInContext(`(async()=>{{{body}}})()`,ctx);process.stdout.write(JSON.stringify(result));}})().catch(e=>{{console.error(e.stack||e);process.exit(1);}});
     """)
-    proc = subprocess.run([NODE, "-e", script], check=True, capture_output=True, text=True, timeout=15)
+    proc = subprocess.run([NODE, "-"], input=script, check=True, capture_output=True, text=True, timeout=15)
     return json.loads(proc.stdout)
 
 

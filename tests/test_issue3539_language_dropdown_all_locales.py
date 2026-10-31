@@ -14,11 +14,11 @@ PANELS_JS = (Path(__file__).resolve().parents[1] / "static" / "panels.js").read_
 
 
 def _language_dropdown_block() -> str:
-    # Anchor on the dropdown-population site (langSel.innerHTML='' precedes the
-    # LOCALES enumeration); there is an earlier settingsLanguage reference for
-    # the apply-on-load path, so don't anchor on the first match.
-    i = PANELS_JS.index("langSel.innerHTML=''")
-    return PANELS_JS[i:i + 700]
+    # The Settings language <select> is React-driven: loadSettingsPanel publishes
+    # the locale options as data via settingsHost.setLocaleOptions (the select is
+    # rendered from opt.locales in SettingsPanes.tsx). Anchor on that call site.
+    i = PANELS_JS.index("const localeOptions=")
+    return PANELS_JS[i:i + 400]
 
 
 def test_language_dropdown_lists_all_locales_no_allowlist():
@@ -27,6 +27,7 @@ def test_language_dropdown_lists_all_locales_no_allowlist():
     assert "Object.entries(LOCALES)" in block, (
         "the language dropdown must enumerate all LOCALES entries"
     )
+    assert "setLocaleOptions(localeOptions)" in block
     # ...with NO hardcoded allow-list filter that drops existing locales.
     assert "allowed=[" not in block.replace(" ", "") and "allowed = [" not in block, (
         "the language dropdown must NOT filter LOCALES to a hardcoded allow-list "
@@ -39,7 +40,9 @@ def test_language_dropdown_lists_all_locales_no_allowlist():
 
 def test_language_change_applies_locale_instantly():
     """#3539 keeper: changing the dropdown applies the locale live, not just on save."""
-    block = _language_dropdown_block()
-    assert "setLocale(this.value)" in block.replace(" ", "").replace("\n", "") or "setLocale(this.value)" in block, (
+    i = PANELS_JS.index("typeof payload.language==='string'")
+    block = PANELS_JS[i:i + 400]
+    assert "setLocale(payload.language)" in block, (
         "language change should call setLocale() for instant apply"
     )
+    assert "applyLocaleToDOM()" in block

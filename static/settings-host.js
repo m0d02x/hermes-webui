@@ -26,7 +26,7 @@
   });
   const controlIds = {
     theme: 'settingsTheme', skin: 'settingsSkin', font_size: 'settingsFontSize',
-    workspace_todos_tab: 'settingsWorkspaceTodosTab', session_jump_buttons: 'settingsSessionJumpButtons',
+    workspace_todos_tab: 'settingsWorkspaceTodosTab', screen_reader_mode: 'settingsScreenReaderMode', session_jump_buttons: 'settingsSessionJumpButtons',
     session_endless_scroll: 'settingsSessionEndlessScroll', auto_scroll_follow: 'settingsAutoScrollFollow',
     chat_activity_display_mode: 'settingsChatActivityDisplayMode', transparent_stream_event_timestamps: 'settingsTransparentEventTimestamps',
     render_user_markdown: 'settingsRenderUserMarkdown', large_text_paste_as_attachment: 'settingsLargeTextPasteAsAttachment',
@@ -177,6 +177,7 @@
       update({ appearance: { ...snapshot.appearance, settingsWorkspacePanelOpen: open } });
       emit('workspace-panel-open', { open });
     },
+    setChatTodosInChat: checked => emit('chat-todos-in-chat', { checked }),
     requestNotificationPermission: () => emit('notification-permission'),
     sendTestNotification: () => emit('test-notification'),
     openAdvancedModel: task => emit('open-advanced-model', { task }),
