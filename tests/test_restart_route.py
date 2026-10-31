@@ -58,11 +58,11 @@ def inline_restart(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda *_: None)
 
     class Inline:
-        def __init__(self, target, daemon=False):
-            self.target = target
+        def __init__(self, target, args=(), kwargs=None, daemon=False, **_):
+            self.target, self.args, self.kwargs = target, args, kwargs or {}
 
         def start(self):
-            self.target()
+            self.target(*self.args, **self.kwargs)
 
     monkeypatch.setattr(threading, "Thread", Inline)
     return execs, waited

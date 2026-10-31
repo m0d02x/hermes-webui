@@ -27,8 +27,19 @@ from urllib.parse import urlparse
 from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
-from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
-from api.subprocess_utils import windows_hide_flags
+from api.config import REPO_ROOT
+# Restart safety now reads run state through api.run_drain (#7293); these names
+# stay importable here because existing tests patch ``api.updates.STREAMS``.
+from api.config import STREAMS, STREAMS_LOCK  # noqa: F401
+from api.subprocess_utils import (
+    clean_git_env,
+    noninteractive_git_env,
+    noninteractive_git_argv,
+    repository_git_proxy_blocks,
+    sanitize_git_diagnostic,
+    trusted_git_credential_config,
+    windows_hide_flags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +61,7 @@ CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
-_CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
-_GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
-_QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|oauth_token|private_token|client_secret|app_secret|api[_-]?key|token|password|secret|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+
 _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'could not resolve host',
     'failed to connect',
@@ -65,7 +74,32 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
+# `_run_git` reports a command it cancelled at its own timeout as
+# "git <args> timed out after <n>s". That line is our deadline, not a network
+# symptom: the apply fetch runs with a 15 s budget, so classify the marker as
+# a timeout with its bound. libcurl's real "Operation timed out after <n>
+# milliseconds" stalls are not `git `-prefixed and keep network guidance.
+_FETCH_DEADLINE_TIMEOUT_RE = re.compile(
+    r'^git (?P<operation>.+?) timed out after (?P<bound>\d+(?:\.\d+)?)s$',
+    re.MULTILINE,
+)
+# Git < 2.51 names the blocking ref ("'refs/remotes/origin/x' exists; cannot
+# create 'refs/remotes/origin/x/y'"). Git >= 2.51 batches fetch ref updates
+# and reports the same name conflict only through the summary hint, which
+# fetch.c emits solely for REF_TRANSACTION_ERROR_NAME_CONFLICT; stale-lock
+# failures keep their "Unable to create '...lock'" wording and never match.
+_REMOTE_REF_COLLISION_RE = re.compile(
+    r"exists; cannot create ['\"]refs/remotes/origin/"
+    r"|some local refs could not be updated; try running\s+['\"]git remote prune origin['\"]"
+)
 _RELEASE_TAG_RE = re.compile(r'^v[0-9][0-9A-Za-z.+-]*$')
+_EXPERIMENTAL_RELEASE_TAG_RE = re.compile(r'^exp-v[0-9]+(?:\.[0-9]+)*$')
+_GITHUB_RELEASE_TAGS_URL = 'https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100'
+_GITHUB_EXPERIMENTAL_REFS_URL = (
+    'https://api.github.com/repos/nesquena/hermes-webui/'
+    'git/matching-refs/tags/exp-v?per_page=100'
+)
+_GITHUB_RELEASE_MAX_PAGES = 20
 # Phrases git emits when its own short-lived index/refs lock files block a
 # subsequent operation. Tuned to match only the true "lock file already exists"
 # semantics that warrant a lock-conflict response -- v2 deliberately drops the
@@ -115,19 +149,24 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
     but strip URL userinfo, common GitHub token shapes, and secret-looking query
     parameter values before any message reaches the update-check API/UI.
     """
-    if not output:
-        return ""
-    sanitized = _CREDENTIAL_IN_URL_RE.sub(r"\1<redacted>@", str(output))
-    sanitized = _GITHUB_TOKEN_RE.sub("<redacted>", sanitized)
-    sanitized = _QUERY_SECRET_RE.sub(r"\1<redacted>", sanitized)
-    sanitized = sanitized.strip()
-    if len(sanitized) > limit:
-        sanitized = sanitized[:limit].rstrip() + "…"
-    return sanitized
+    return sanitize_git_diagnostic(output, limit=limit)
 
 
 def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
-    """Return the apply-path fetch failure message for the given stderr."""
+    """Return the apply-path fetch failure message for the given stderr.
+
+    A fetch the updater cancelled at its own deadline is a timeout: say so,
+    naming the cancelled command and its bound. The echoed command is run
+    through the same credential scrub as every other git diagnostic. Only real
+    network signatures keep the connectivity guidance.
+    """
+    cancelled = _FETCH_DEADLINE_TIMEOUT_RE.search(fetch_out or '')
+    if cancelled:
+        return (
+            f'The fetch was cancelled after {cancelled.group("bound")}s — '
+            f'git {_sanitize_git_diagnostic(cancelled.group("operation"))} '
+            f'did not finish before the update deadline.'
+        )
     detail = _sanitize_git_diagnostic(fetch_out)
     if not detail:
         return network_message
@@ -138,27 +177,24 @@ def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
 
 
 def _restart_blocker_snapshot() -> dict:
-    """Return active chat work that should block a self-restart."""
-    with STREAMS_LOCK:
-        stream_ids = [str(k) for k in STREAMS.keys()]
-    run_ids: list[str] = []
-    try:
-        from api import config as _config
-        active_runs = getattr(_config, 'ACTIVE_RUNS', {})
-        active_runs_lock = getattr(_config, 'ACTIVE_RUNS_LOCK', None)
-        if active_runs_lock is not None:
-            with active_runs_lock:
-                run_ids = [str(k) for k in active_runs.keys()]
-        else:
-            run_ids = [str(k) for k in active_runs.keys()]
-    except Exception:
-        run_ids = []
+    """Return the WebUI-owned chat work that should block a self-restart.
+
+    A Gateway run is excluded only once its resumable run identity is saved
+    (#7293): it runs inside the Hermes Gateway, survives a WebUI restart and is
+    reattached afterwards. Legacy Gateway relays and Gateway launches still
+    awaiting that handoff are counted (see run_drain.webui_owned_active_runs).
+    """
+    from api import run_drain
+
+    runs = run_drain.webui_owned_active_runs()
+    stream_ids = [r['stream_id'] for r in runs if r.get('registered_stream')]
+    run_ids = [r['stream_id'] for r in runs]
     return {
         'active_streams': len(stream_ids),
         'active_runs': len(run_ids),
         'blocking_stream_ids': stream_ids[:10],
         'blocking_run_ids': run_ids[:10],
-        'restart_blocked': bool(stream_ids or run_ids),
+        'restart_blocked': bool(run_ids),
     }
 
 
@@ -175,27 +211,27 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
     if isinstance(blocker_snapshot, int):
         blocker_snapshot = {
             'active_streams': blocker_snapshot,
-            'active_runs': 0,
+            'active_runs': blocker_snapshot,
             'blocking_stream_ids': [],
             'blocking_run_ids': [],
             'restart_blocked': bool(blocker_snapshot),
         }
     active_streams = int(blocker_snapshot.get('active_streams') or 0)
-    active_runs = int(blocker_snapshot.get('active_runs') or 0)
-    parts = []
-    if active_streams:
-        parts.append(f"{active_streams} active chat stream{'s' if active_streams != 1 else ''}")
-    if active_runs:
-        parts.append(f"{active_runs} active agent run{'s' if active_runs != 1 else ''}")
-    detail = ' and '.join(parts) or 'active chat work'
+    active_runs = int(blocker_snapshot.get('active_runs') or 0) or active_streams
+    detail = f"{active_runs} WebUI agent run{'s are' if active_runs != 1 else ' is'} active"
     return {
         'ok': False,
         'message': (
-            f'Cannot update {target} while {detail} is running. '
-            'Wait for the response to finish, then retry the update.'
+            f'Cannot update {target} while {detail}. '
+            'Wait for the response to finish and retry, or force the update '
+            'to interrupt the active run' + ('s' if active_runs != 1 else '') + '.'
         ),
         'target': target,
         'restart_blocked': True,
+        # #7293: the refusal is the default, not a dead end. The client may
+        # re-send the request with force_active_runs=true after an explicit
+        # confirmation; the forced restart settles the runs as interrupted.
+        'force_available': True,
         'active_streams': active_streams,
         'active_runs': active_runs,
         'blocking_stream_ids': blocker_snapshot.get('blocking_stream_ids') or [],
@@ -203,23 +239,32 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
     }
 
 
-def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float = 300.0) -> dict:
-    """Wait for active work to finish before self-reexec.
+def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float | None = None) -> dict:
+    """Wait (bounded) for WebUI-owned work to finish before self-reexec.
 
-    Bounded by ``max_wait_seconds`` so a long-running (or stuck/orphaned) agent
-    run can't soft-jam the self-update indefinitely. If the deadline is reached
-    while work is still in flight, the snapshot is returned with
-    ``wait_timed_out=True`` so the caller can proceed with the re-exec anyway
-    (preserving the pre-#3105 "execv preempts in-flight work" fallback) rather
-    than holding ``_apply_lock`` for the run's full lifetime.
+    Run admission is fenced while an update is applied and stays closed until
+    the restart, so normally nothing is active here. A forced restart does not
+    wait at all. Otherwise the wait is bounded by ``max_wait_seconds``
+    (default: the shutdown drain budget, ``HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS``);
+    on timeout the snapshot carries ``wait_timed_out=True`` and the caller
+    settles the remaining runs as interrupted before re-exec (#7293) instead of
+    letting ``execv`` drop them silently.
     """
+    from api import run_drain
+
     snapshot = _restart_blocker_snapshot()
+    if snapshot.get('restart_blocked') and run_drain.restart_force_requested():
+        snapshot = dict(snapshot)
+        snapshot['forced'] = True
+        return snapshot
+    if max_wait_seconds is None:
+        max_wait_seconds = run_drain.shutdown_drain_budget_seconds()
     deadline = time.monotonic() + max(0.0, max_wait_seconds)
     while snapshot.get('restart_blocked'):
         if time.monotonic() >= deadline:
             logger.warning(
                 "restart-safety wait exceeded %.0fs with work still in flight (%s); "
-                "proceeding with re-exec anyway",
+                "settling it as interrupted before re-exec",
                 max_wait_seconds, snapshot,
             )
             snapshot = dict(snapshot)
@@ -235,35 +280,79 @@ def _run_git(args, cwd, timeout=10):
 
     On failure, returns stderr (or stdout as fallback) so callers can
     surface actionable git error messages instead of empty strings.
+
+    The child gets a scrubbed environment (``clean_git_env``). Update checks run
+    unattended, so inherited desktop askpass helpers must not turn a remote 401
+    into a credential dialog the user never asked for. Credential helpers from
+    system and user config remain available; checkout config cannot add one.
     """
     git_executable = _resolve_git_executable()
     if not git_executable:
         return 'git executable not found', False
+    env = clean_git_env()
+    if repository_git_proxy_blocks(args, cwd, env, executable=git_executable):
+        return 'repository-configured core.gitProxy is not allowed for git:// update remotes', False
+    is_network_command = bool(args and args[0] in {'fetch', 'pull', 'push', 'ls-remote'})
+    credential_config = ()
+    if is_network_command:
+        credential_config = trusted_git_credential_config(
+            cwd,
+            env,
+            executable=git_executable,
+        )
+        env = noninteractive_git_env(cwd, env, executable=git_executable, args=args)
     try:
         r = subprocess.run(
-            [git_executable] + args,
+            noninteractive_git_argv(
+                args,
+                executable=git_executable,
+                credential_config=credential_config,
+            ) if is_network_command else [git_executable] + args,
             cwd=str(cwd),
             capture_output=True,
             text=True,
             timeout=timeout,
             encoding='utf-8',
             errors='replace',
+            env=env,
             creationflags=windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
         # the whole import with AttributeError. Guard against None defensively.
-        stdout = (r.stdout or '').strip()
+        raw_stdout = r.stdout or ''
+        # ``-z`` output is a byte-for-byte path protocol: leading/trailing
+        # whitespace belongs to filenames and must not be stripped.  Textual
+        # commands retain the historical trimming behaviour.
+        stdout = raw_stdout if '-z' in args else raw_stdout.strip()
         stderr = (r.stderr or '').strip()
         if r.returncode == 0:
             return stdout, True
+        if (args[:2] == ['fetch', 'origin']
+                and all(arg in {'--quiet', '--tags', '--force'} for arg in args[2:])
+                and _REMOTE_REF_COLLISION_RE.search(stderr or stdout)):
+            refspec, refspec_ok = _run_git(['config', '--get-all', 'remote.origin.fetch'], cwd)
+            # Custom destinations may prune local tags or branches; fail closed.
+            if refspec_ok and refspec == '+refs/heads/*:refs/remotes/origin/*':
+                return _run_git([
+                    'fetch', 'origin', '--prune', '--no-prune-tags', '--refmap=',
+                    *args[2:], '+refs/heads/*:refs/remotes/origin/*',
+                ], cwd, timeout=timeout)
         return stderr or stdout or f"git exited with status {r.returncode}", False
     except subprocess.TimeoutExpired as exc:
-        # TimeoutExpired keeps partial output as bytes even with text=True.
-        detail = next((v for v in (exc.stderr, exc.stdout) if v), '')
-        if isinstance(detail, bytes):
-            detail = detail.decode('utf-8', errors='replace')
-        detail = detail.strip()
+        # text=True decodes only the *completed* run's pipes; on a timeout
+        # subprocess still hands back the raw partial output as bytes, so a
+        # timed-out command that had already printed (e.g. a slow `git pull`
+        # on a bad link) used to leak bytes into callers' str handling and
+        # crash the update endpoint with TypeError (#8198).
+        raw = getattr(exc, 'stderr', None) or getattr(exc, 'stdout', None) or ''
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode('utf-8', 'replace')
+        # The partial output is user-facing git text: a pull that died on a
+        # credentialed remote can echo the URL (with its token) before timing
+        # out, so run it through the same credential scrub the fetch path uses.
+        # limit=sys.maxsize: never truncate. Redaction can lengthen the text, so len(raw) would cut its tail.
+        detail = _sanitize_git_diagnostic(raw, limit=sys.maxsize)
         return detail or f"git {' '.join(args)} timed out after {timeout}s", False
     except FileNotFoundError:
         return 'git executable not found', False
@@ -343,7 +432,7 @@ def _inventory_locks(path: Path) -> dict:
     return out
 
 
-def apply_clear_lock(target: str) -> dict:
+def apply_clear_lock(target: str, *, force_active_runs: bool = False) -> dict:
     """Manual-instruction lock recovery for ``target``.
 
     v2.2: NEVER removes a lock file. Strategy:
@@ -362,63 +451,100 @@ def apply_clear_lock(target: str) -> dict:
         (now that the lock is gone) will take the success branch and
         re-run the normal apply.
     """
+    return _run_fenced_update(
+        target, force_active_runs, lambda: _apply_clear_lock_inner(target)
+    )
+
+
+def _apply_clear_lock_inner(target: str) -> dict:
+    """Body of ``apply_clear_lock``; runs under ``_apply_lock`` + the admission fence."""
+    if target == 'webui':
+        path = REPO_ROOT
+    elif target == 'agent':
+        path = _AGENT_DIR
+    else:
+        return {'ok': False, 'message': f'Unknown target: {target}'}
+
+    if path is None or not (path / '.git').exists():
+        return {'ok': False, 'message': 'Not a git repository'}
+
+    inv = _inventory_locks(path)
+    manual_command = f"rm -f {inv['well_known_lock_path']}"
+
+    if not inv['well_known_lock_present']:
+        # Lock is gone. Run the normal non-destructive update flow and
+        # annotate the response with what we found for the user's
+        # records. Pass the configured channel through — otherwise an
+        # experimental-channel WebUI lock-recovery retry silently falls back
+        # to stable (Codex gate: _apply_update_inner defaults to stable).
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+        retry_result = _apply_update_inner(target, _read_update_channel())
+        retry_result = dict(retry_result)
+        retry_result['lock_recovery'] = {
+            'action': 'no-lock-found',
+            'manual_command': manual_command,
+            'other_locks': inv['other_locks'],
+        }
+        return retry_result
+
+    # Lock is present. The server cannot prove it's safe to delete;
+    # the only safe path is to ask the operator.
+    message = (
+        'A git lock file (.git/index.lock) is present. The server does '
+        'not delete locks automatically -- git uses O_CREAT|O_EXCL '
+        'locking, which cannot be detected with advisory probes. To '
+        'recover: confirm no other git process is running against '
+        f'this checkout, then run: {manual_command}  '
+        'Click "Retry update" once you have removed it.'
+    )
+    return {
+        'ok': False,
+        'message': message,
+        'lock_held': True,
+        'target': target,
+        'manual_command': manual_command,
+        'well_known_lock_path': inv['well_known_lock_path'],
+        'other_locks': inv['other_locks'],
+    }
+
+
+def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
+    """Refuse / fence / re-check wrapper shared by every update entry point (#7293).
+
+    1. Refuse by default while WebUI-owned runs are active (``force_available``
+       tells the client an explicit force exists).
+    2. Take ``_apply_lock`` and close run admission for the whole update, so no
+       run can start between the safety check and the re-exec.
+    3. Re-check after fencing: a run admitted just before the fence closed must
+       still refuse an unforced update.
+    4. Release the hold on the way out. A scheduled restart keeps admission
+       closed on its own (``run_drain.mark_restart_pending``) until the process
+       is replaced; a failed update reopens it.
+    """
+    from api import run_drain
+
     blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
+    if blocker_snapshot.get('restart_blocked') and not force_active_runs:
         return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
-
     try:
-        if target == 'webui':
-            path = REPO_ROOT
-        elif target == 'agent':
-            path = _AGENT_DIR
-        else:
-            return {'ok': False, 'message': f'Unknown target: {target}'}
-
-        if path is None or not (path / '.git').exists():
-            return {'ok': False, 'message': 'Not a git repository'}
-
-        inv = _inventory_locks(path)
-        manual_command = f"rm -f {inv['well_known_lock_path']}"
-
-        if not inv['well_known_lock_present']:
-            # Lock is gone. Run the normal non-destructive update flow and
-            # annotate the response with what we found for the user's
-            # records. Pass the configured channel through — otherwise an
-            # experimental-channel WebUI lock-recovery retry silently falls back
-            # to stable (Codex gate: _apply_update_inner defaults to stable).
-            with _cache_lock:
-                _update_cache['checked_at'] = 0
-            retry_result = _apply_update_inner(target, _read_update_channel())
-            retry_result = dict(retry_result)
-            retry_result['lock_recovery'] = {
-                'action': 'no-lock-found',
-                'manual_command': manual_command,
-                'other_locks': inv['other_locks'],
-            }
-            return retry_result
-
-        # Lock is present. The server cannot prove it's safe to delete;
-        # the only safe path is to ask the operator.
-        message = (
-            'A git lock file (.git/index.lock) is present. The server does '
-            'not delete locks automatically -- git uses O_CREAT|O_EXCL '
-            'locking, which cannot be detected with advisory probes. To '
-            'recover: confirm no other git process is running against '
-            f'this checkout, then run: {manual_command}  '
-            'Click "Retry update" once you have removed it.'
-        )
-        return {
-            'ok': False,
-            'message': message,
-            'lock_held': True,
-            'target': target,
-            'manual_command': manual_command,
-            'well_known_lock_path': inv['well_known_lock_path'],
-            'other_locks': inv['other_locks'],
-        }
+        token = run_drain.hold_run_admission(f'update:{target}', force=bool(force_active_runs))
+        try:
+            blocker_snapshot = _restart_blocker_snapshot()
+            if blocker_snapshot.get('restart_blocked'):
+                if not force_active_runs:
+                    return _restart_blocked_response(target, blocker_snapshot)
+                logger.warning(
+                    "Forced %s update with %s active WebUI run(s); they will be "
+                    "settled as interrupted before the restart",
+                    target, blocker_snapshot.get('active_runs'),
+                )
+            return run()
+        finally:
+            run_drain.release_run_admission_hold(token)
     finally:
         _apply_lock.release()
 
@@ -868,20 +994,34 @@ def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
 def _release_tag_sort_key(tag):
     """Return a version-sort key that keeps release tags newest-first."""
     raw = str(tag or '').strip()
-    if raw.startswith('v'):
+    if raw.startswith('exp-v'):
+        raw = raw[5:]
+    elif raw.startswith('v'):
         raw = raw[1:]
     parts = []
     for chunk in re.split(r'(\d+)', raw):
         if not chunk:
             continue
         parts.append((0, int(chunk)) if chunk.isdigit() else (1, chunk.lower()))
+    # For the same numeric release, the final tag sorts after prereleases so
+    # reverse=True puts exp-v1.2.3 ahead of exp-v1.2.3-rc1.
+    if '-' not in raw:
+        parts.append((2, ''))
     return tuple(parts)
+
+
+def _is_release_tag_for_channel(tag, channel=DEFAULT_UPDATE_CHANNEL):
+    """Return True when ``tag`` belongs to the selected release channel."""
+    raw = str(tag or '').strip()
+    channel = _normalize_channel(channel)
+    if channel == 'experimental':
+        return bool(_EXPERIMENTAL_RELEASE_TAG_RE.fullmatch(raw))
+    return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
 
 
 def _is_stable_release_tag(tag):
     """Return True for stable release tags and False for prerelease tags."""
-    raw = str(tag or '').strip()
-    return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
+    return _is_release_tag_for_channel(tag, DEFAULT_UPDATE_CHANNEL)
 
 
 def _is_calendar_tag(tag):
@@ -890,31 +1030,69 @@ def _is_calendar_tag(tag):
     return bool(m and int(m.group(1)) >= 2000)
 
 
-def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100', *, timeout=3.0):
-    """Return GitHub release tags newest-first, including commit SHAs when available."""
-    request = urllib.request.Request(
-        url,
-        headers={
-            'Accept': 'application/vnd.github+json',
-            'User-Agent': 'hermes-webui',
-        },
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode('utf-8'))
-    if not isinstance(payload, list):
-        return []
+def _github_release_tags(
+    url=None,
+    *,
+    timeout=3.0,
+    channel=DEFAULT_UPDATE_CHANNEL,
+):
+    """Return GitHub tags for the selected channel, newest-first, with SHAs."""
+    channel = _normalize_channel(channel)
+    use_matching_refs = channel == 'experimental' and url is None
+    if url is None:
+        url = _GITHUB_EXPERIMENTAL_REFS_URL if use_matching_refs else _GITHUB_RELEASE_TAGS_URL
+    payload = []
+    next_url = url
+    seen_urls = set()
+    while next_url:
+        if next_url in seen_urls or len(seen_urls) >= _GITHUB_RELEASE_MAX_PAGES:
+            return []
+        seen_urls.add(next_url)
+        request = urllib.request.Request(
+            next_url,
+            headers={
+                'Accept': 'application/vnd.github+json',
+                'User-Agent': 'hermes-webui',
+            },
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            page = json.loads(response.read().decode('utf-8'))
+            link = getattr(response, 'headers', {}).get('Link', '')
+        if not isinstance(page, list):
+            return []
+        payload.extend(page)
+        next_url = None
+        if use_matching_refs and link:
+            match = re.search(r'<([^>]+)>;\s*rel="next"', link)
+            if match:
+                candidate = match.group(1)
+                parsed = urlparse(candidate)
+                if (
+                    parsed.scheme == 'https'
+                    and parsed.netloc == 'api.github.com'
+                    and parsed.path == (
+                        '/repos/nesquena/hermes-webui/'
+                        'git/matching-refs/tags/exp-v'
+                    )
+                ):
+                    next_url = candidate
     tags = []
     for item in payload:
         if not isinstance(item, dict):
             continue
         name = item.get('name')
+        if use_matching_refs:
+            ref = item.get('ref')
+            if not isinstance(ref, str) or not ref.startswith('refs/tags/'):
+                continue
+            name = ref[len('refs/tags/'):]
         if not isinstance(name, str):
             continue
         name = name.strip()
-        if not _is_stable_release_tag(name):
+        if not _is_release_tag_for_channel(name, channel):
             continue
         commit = item.get('commit')
-        sha = None
+        sha = name if use_matching_refs else None
         if isinstance(commit, dict):
             commit_sha = commit.get('sha')
             if isinstance(commit_sha, str):
@@ -925,29 +1103,50 @@ def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui
     return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
 
 
-def _check_webui_published_release_update():
-    """Return a manual-update payload when the baked WebUI version trails GitHub tags."""
+def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
+    """Return a manual-update payload when the baked WebUI trails its channel."""
+    channel = _normalize_channel(channel)
     current_version = str(WEBUI_VERSION or '').strip()
-    if not _RELEASE_TAG_RE.fullmatch(current_version):
+    stable_to_experimental = (
+        channel == 'experimental' and _is_stable_release_tag(current_version)
+    )
+    if not (
+        _is_release_tag_for_channel(current_version, channel)
+        or stable_to_experimental
+    ):
         return None
     try:
-        tags = _github_release_tags()
+        tags = _github_release_tags(channel=channel)
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
         return None
     if not tags:
         return None
 
     tag_names = [item['name'] for item in tags]
-    if current_version not in tag_names:
-        return None
-
-    latest = tags[0]
+    if stable_to_experimental:
+        current_key = _release_tag_sort_key(current_version)
+        newer_tags = [
+            item for item in tags
+            if _release_tag_sort_key(item['name']) > current_key
+        ]
+        if not newer_tags:
+            return None
+        latest = newer_tags[0]
+        behind = len(newer_tags)
+        current = {}
+    else:
+        if current_version not in tag_names:
+            return None
+        latest = tags[0]
+        behind = _release_gap(tag_names, current_version, latest['name'])
+        current = next(
+            (item for item in tags if item['name'] == current_version),
+            None,
+        ) or {}
     latest_version = latest['name']
-    behind = _release_gap(tag_names, current_version, latest_version)
     if behind <= 0:
         return None
 
-    current = next((item for item in tags if item['name'] == current_version), None) or {}
     current_ref = current.get('sha') or current_version
     latest_ref = latest.get('sha') or latest_version
     repo_url = 'https://github.com/nesquena/hermes-webui'
@@ -961,8 +1160,14 @@ def _check_webui_published_release_update():
         'release_based': True,
         'current_version': current_version,
         'latest_version': latest_version,
+        # Same field as the git paths: on the no-git/Docker payload the
+        # frontend's "Latest tag:" suffix would otherwise fall back to the
+        # Agent's tag (e.g. "Latest tag: v2026.9.24" while trailing a WebUI
+        # release). Maintainer fold, PR #6859 round 3.
+        'latest_tag': latest_version,
         'compare_url': _build_compare_url(repo_url, current_ref, latest_ref),
         'manual_update': True,
+        'channel': channel,
     }
 
 
@@ -1074,7 +1279,7 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     return f'origin/{branch}'
 
 
-def _channel_up_to_date_info(path, name, channel, current_tag):
+def _channel_up_to_date_info(path, name, channel, current_tag, latest_tag=None):
     """Return an 'up to date' payload for a channel that must NOT branch-compare.
 
     Used by the stable channel: stable tags are a promoted subset of master, so
@@ -1094,6 +1299,10 @@ def _channel_up_to_date_info(path, name, channel, current_tag):
         'release_based': True,
         'current_version': current_tag,
         'latest_version': current_tag,
+        # Real latest channel tag for the frontend's "Latest tag:" suffix —
+        # latest_version here holds the CURRENT tag (HEAD is on it), so the
+        # frontend must never fall back to it as a "latest" tag. (#6859 S1)
+        'latest_tag': latest_tag or current_tag,
         'channel': channel,
     }
 
@@ -1160,7 +1369,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     suppress_stable_fallthrough = (channel == 'stable' and name == 'webui')
     if behind == 0 and _head_is_past_latest_tag(path, current_tag, channel):
         if suppress_stable_fallthrough:
-            return _channel_up_to_date_info(path, name, channel, current_tag)
+            return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
 
     # Users tracking main can already contain the newest fetched release tag
@@ -1170,7 +1379,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # configured upstream instead of advertising a tag that cannot fast-forward.
     if behind > 0 and _head_contains_ref(path, latest_tag):
         if suppress_stable_fallthrough:
-            return _channel_up_to_date_info(path, name, channel, current_tag)
+            return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
 
     # Patch releases can land on a side branch while day-to-day installs track
@@ -1178,7 +1387,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # that `git pull --ff-only <latest-tag>` cannot reach.
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
         if suppress_stable_fallthrough:
-            return _channel_up_to_date_info(path, name, channel, current_tag)
+            return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
@@ -1201,6 +1410,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
         'release_based': True,
         'current_version': current_version_display,
         'latest_version': latest_tag,
+        'latest_tag': latest_tag,
         'channel': channel,
     }
 
@@ -1276,6 +1486,125 @@ def _check_repo_branch(path, name, *, fetch=True):
     }
 
 
+def _update_recovery_hints(path: Path, compare_ref: str | None = None) -> dict:
+    """Report which update-recovery conditions a checkout still shows.
+
+    The Docker manual notice keeps Agent recovery buttons (``Force update`` /
+    ``Clear lock and retry``) alive across update checks. Persisting them
+    without re-validating the repo left a destructive force button armed after
+    the underlying conflict was resolved outside the UI (Greptile P1 on
+    #8040). Every check now answers "does the recovery condition still
+    exist?" from live repo state:
+
+    - ``force``: unresolved merge conflicts, divergent history, or an
+      untracked path that the offered ref would overwrite -- every condition
+      that can arm the destructive recovery button.
+    - ``clear_lock``: a stale ``.git/index.lock`` is present (the only lock
+      the clear-lock flow addresses).
+
+    ``None`` means "could not determine": the UI must never clear a recovery
+    button on a failed probe.
+    """
+    hints = {'force': None, 'clear_lock': None}
+    git_dir = path / '.git'
+    try:
+        git_dir_is_directory = git_dir.is_dir()
+    except OSError:
+        git_dir_is_directory = False
+    if git_dir_is_directory:
+        inv = _inventory_locks(path)
+        hints['clear_lock'] = bool(inv.get('well_known_lock_present'))
+    status_out, status_ok = _run_git(
+        [
+            '--no-optional-locks',
+            'status',
+            '--porcelain=v1',
+            '-z',
+            '--untracked-files=all',
+            '--no-renames',
+        ],
+        path,
+        timeout=5,
+    )
+    if not status_ok:
+        return hints
+
+    entries = [entry for entry in status_out.split('\0') if entry]
+    if any(
+        entry[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'}
+        for entry in entries
+    ):
+        hints['force'] = True
+        return hints
+
+    # Without a freshly fetched comparison ref, a clean index is not enough
+    # to clear Force update: the checkout may still be divergent or an
+    # untracked path may still collide with the pending update.
+    if not compare_ref:
+        return hints
+
+    counts_out, counts_ok = _run_git(
+        ['rev-list', '--left-right', '--count', f'HEAD...{compare_ref}'],
+        path,
+        timeout=5,
+    )
+    counts = counts_out.split() if counts_ok else []
+    if len(counts) != 2 or not all(part.isdigit() for part in counts):
+        return hints
+    diverged = int(counts[0]) > 0 and int(counts[1]) > 0
+
+    untracked = [entry[3:] for entry in entries if entry.startswith('?? ')]
+    # Git collapses an untracked nested repository to ``dir/`` even with
+    # --untracked-files=all.  Its contents are therefore unknown: an incoming
+    # path below it may collide, but different contents may also be harmless.
+    # Keep that state inconclusive instead of claiming either safe or unsafe.
+    collapsed_untracked_dirs = [item.rstrip('/') for item in untracked if item.endswith('/')]
+    explicit_untracked = [item for item in untracked if not item.endswith('/')]
+    collision = False
+    collapsed_overlap = False
+    if untracked:
+        added_out, added_ok = _run_git(
+            [
+                'diff-tree',
+                '-r',
+                '--no-renames',
+                '--diff-filter=A',
+                '--name-only',
+                '-z',
+                'HEAD',
+                compare_ref,
+            ],
+            path,
+            timeout=5,
+        )
+        if not added_ok:
+            return hints
+        added = [entry for entry in added_out.split('\0') if entry]
+        collision = any(
+            local == incoming
+            or local.startswith(f'{incoming}/')
+            or incoming.startswith(f'{local}/')
+            for local in explicit_untracked
+            for incoming in added
+        )
+        # Both directions matter: an incoming path at or below the collapsed
+        # directory, and a collapsed directory at or below an incoming blob
+        # (git refuses to replace a directory holding untracked content).
+        collapsed_overlap = any(
+            incoming == local_dir
+            or incoming.startswith(f'{local_dir}/')
+            or local_dir.startswith(f'{incoming}/')
+            for local_dir in collapsed_untracked_dirs
+            for incoming in added
+        )
+
+    if diverged or collision:
+        hints['force'] = True
+    elif not collapsed_overlap:
+        hints['force'] = False
+    return hints
+
+
 def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """Check if a git repo is behind its latest release. Returns dict or None.
 
@@ -1292,7 +1621,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     channel = _normalize_channel(channel)
     if path is None or not (path / '.git').exists():
         if name == 'webui':
-            release_info = _check_webui_published_release_update()
+            release_info = _check_webui_published_release_update(channel)
             if release_info is not None:
                 release_info = dict(release_info)
                 release_info['no_git'] = True
@@ -1302,6 +1631,15 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             'behind': None,
             'no_git': True,
         }
+
+    # Recovery hints are consumed by the Docker manual notice, which offers
+    # Agent-only recovery buttons; other targets keep their payload unchanged.
+    # This is what lets the frontend clear a stale recovery button once the
+    # repo no longer needs it (Greptile P1 on #8040).
+    def attach_recovery(payload, compare_ref=None):
+        if payload is not None and name == 'agent':
+            payload['recovery'] = _update_recovery_hints(path, compare_ref)
+        return payload
 
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
@@ -1323,27 +1661,44 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             release_info['error'] = message
             release_info['stale_check'] = True
             release_info['dirty'] = _is_dirty(path)
-            return release_info
-        return {
+            return attach_recovery(release_info)
+        payload = {
             'name': name,
             'behind': None,
             'error': message,
             'stale_check': True,
             'dirty': _is_dirty(path),
         }
+        return attach_recovery(payload)
 
     release_info = _check_repo_release(path, name, channel)
     if release_info is not None:
         release_info = dict(release_info)
         release_info['dirty'] = _is_dirty(path)
-        return release_info
+        return attach_recovery(release_info, release_info.get('branch'))
+
+    # When the release check found no update gap (HEAD already contains the
+    # latest tag), we fall through to the branch check below.  Before doing
+    # that, probe for tag info so the frontend can show "Latest tag: vX.Y.Z"
+    # even when the user is on main ahead of the latest release.  The tag
+    # data is purely informational — the branch check determines whether an
+    # update is actionable.  (_run_git never raises; guard on falsy returns.)
+    _tags = _release_tags(path, channel)
+    _tag_info = None
+    if _tags:
+        _latest = _tags[0]
+        _current = _current_release_tag(path, channel)
+        _tag_info = {'latest_tag': _latest, 'current_tag': _current}
 
     branch_info = _check_repo_branch(path, name, fetch=False)
     if branch_info is not None:
         branch_info = dict(branch_info)
         branch_info['dirty'] = _is_dirty(path)
         branch_info['channel'] = channel
-        return branch_info
+        if _tag_info is not None:
+            branch_info['latest_tag'] = _tag_info['latest_tag']
+            branch_info['current_tag'] = _tag_info['current_tag']
+        return attach_recovery(branch_info, branch_info.get('branch'))
     return None
 
 
@@ -1490,7 +1845,9 @@ def check_for_updates(force=False, *, include_agent=True, include_webui=True, ch
             and cache_matches
             and time.time() - _update_cache['checked_at'] < CACHE_TTL
         ):
-            return dict(_update_cache)
+            cached = dict(_update_cache)
+            cached['cached'] = True
+            return cached
         if not running:
             # Join the in-flight job for this exact key; otherwise start one.
             job = {'result': None, 'error': None}
@@ -1858,7 +2215,23 @@ def _schedule_restart(delay: float = 2.0, *, when_busy: str = 'wait') -> None:
     import os
     import sys
 
+    from api import run_drain
+
+    # #7293: run admission stays closed from now until the process image is
+    # replaced, so no run can start that the restart would drop. If the
+    # restart never replaces the process, the epoch reopens admission below.
+    restart_epoch = run_drain.mark_restart_pending()
+
     def _do():
+        try:
+            _do_restart()
+        finally:
+            # Reaching here means this process was NOT replaced (spawn failure,
+            # an execv that returned under test, an unexpected error). Reopen
+            # admission so the server does not stay closed forever.
+            run_drain.abandon_restart_pending(restart_epoch)
+
+    def _do_restart():
         import time
         time.sleep(delay)
         # Hold _apply_lock through os.execv so no new update can start between
@@ -1879,6 +2252,16 @@ def _schedule_restart(delay: float = 2.0, *, when_busy: str = 'wait') -> None:
                     return
             elif when_busy == 'wait':
                 _wait_until_restart_safe()
+            # #7293: whatever is still running here (a forced update, or a
+            # safety wait that timed out) is settled durably as interrupted
+            # BEFORE the image is replaced, instead of being dropped by execv.
+            # A no-op when nothing is active. Gateway runs are never touched.
+            settled = run_drain.settle_webui_owned_runs(run_drain.RESTART_SETTLE_REASON)
+            if settled.get('settled') or settled.get('pending'):
+                logger.warning(
+                    "restart: settled %d WebUI run(s) as interrupted before re-exec (unsettled: %s)",
+                    len(settled.get('settled') or []), settled.get('pending') or [],
+                )
             # Purge bytecode caches so the new process imports from
             # current source.  Without this, Python may serve stale .pyc
             # files whose mtime matches the just-pulled .py files,
@@ -1932,7 +2315,13 @@ def _schedule_restart(delay: float = 2.0, *, when_busy: str = 'wait') -> None:
                 # Last-resort: let the process supervisor restart us.
                 _windows_restart_exit(0)
 
-    threading.Thread(target=_do, daemon=True).start()
+    try:
+        threading.Thread(target=_do, daemon=True).start()
+    except BaseException:
+        # Only the restart thread reopens admission; one that never started
+        # would leave every chat start refused for the life of the process.
+        run_drain.abandon_restart_pending(restart_epoch)
+        raise
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
@@ -1948,6 +2337,17 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     restart_result = restart_active_profile_gateway(profile=target_profile)
     status = str(restart_result.get("status") or "")
     if status in {"completed", "in_progress"}:
+        return True, restart_result
+    if status == "external":
+        # The monitored Gateway is managed outside WebUI (#8391). The Agent
+        # checkout update itself succeeded; the shared helper launched nothing,
+        # and the response reports ``gateway_restart: "external"`` rather than
+        # claiming the external runtime restarted. No retry: retrying cannot
+        # change ownership.
+        logger.info(
+            "Agent updated; gateway restart skipped because the monitored Gateway "
+            "is managed outside WebUI"
+        )
         return True, restart_result
     if status != "failed":
         return False, restart_result
@@ -2038,7 +2438,7 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     return ok
 
 
-def apply_force_update(target: str, channel=None) -> dict:
+def apply_force_update(target: str, channel=None, *, force_active_runs: bool = False) -> dict:
     """Discard local changes for the requested update target.
 
     Unlike apply_update() which requires a clean working tree and refuses
@@ -2059,139 +2459,134 @@ def apply_force_update(target: str, channel=None) -> dict:
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
-    blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
-        return _restart_blocked_response(target, blocker_snapshot)
+    return _run_fenced_update(
+        target, force_active_runs, lambda: _apply_force_update_inner(target, channel)
+    )
 
-    if not _apply_lock.acquire(blocking=False):
-        return {'ok': False, 'message': 'Update already in progress'}
-    try:
-        if target == 'webui':
-            path = REPO_ROOT
-        elif target == 'agent':
-            path = _AGENT_DIR
-            # Channel is WebUI-only — the Agent always uses the default channel.
-            channel = DEFAULT_UPDATE_CHANNEL
-        else:
-            return {'ok': False, 'message': f'Unknown target: {target}'}
 
-        if path is None or not (path / '.git').exists():
-            return {'ok': False, 'message': 'Not a git repository'}
+def _apply_force_update_inner(target: str, channel) -> dict:
+    """Body of ``apply_force_update``; runs under ``_apply_lock`` + the admission fence."""
+    if target == 'webui':
+        path = REPO_ROOT
+    elif target == 'agent':
+        path = _AGENT_DIR
+        # Channel is WebUI-only — the Agent always uses the default channel.
+        channel = DEFAULT_UPDATE_CHANNEL
+    else:
+        return {'ok': False, 'message': f'Unknown target: {target}'}
 
-        # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
-        # this entry point. The mtime-based heuristic was empirically proven
-        # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
-        # with unchanged mtime) and unconditional pre-cleanup clobbered locks
-        # for force-update retries that had nothing to do with a lock error.
-        # Lock cleanup is now ONLY performed by the explicit
-        # /api/updates/clear_lock endpoint, where the user has opted in to
-        # a non-destructive retry.
+    if path is None or not (path / '.git').exists():
+        return {'ok': False, 'message': 'Not a git repository'}
 
-        # --force so a remote re-tag (e.g. squash-merge that re-points an
-        # existing release tag) doesn't jam the apply path with "would clobber
-        # existing tag". See #2756.
-        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=_APPLY_FETCH_TIMEOUT)
-        if not fetch_ok:
-            return {
-                'ok': False,
-                'message': _apply_fetch_failure_message(
-                    fetch_out,
-                    'Could not reach the remote repository. Check your connection.',
-                ),
-            }
+    # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
+    # this entry point. The mtime-based heuristic was empirically proven
+    # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
+    # with unchanged mtime) and unconditional pre-cleanup clobbered locks
+    # for force-update retries that had nothing to do with a lock error.
+    # Lock cleanup is now ONLY performed by the explicit
+    # /api/updates/clear_lock endpoint, where the user has opted in to
+    # a non-destructive retry.
 
-        compare_ref = _select_apply_compare_ref(path, channel, target)
-        # Stable channel, already up to date on the promoted subset: nothing to
-        # force to. Do NOT fall back to origin/master (firehose). See
-        # _select_apply_compare_ref channel semantics.
-        if compare_ref is None:
-            dirty_state = None
-            if target == 'webui' and channel == 'stable':
-                dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
-            if dirty_state is True:
-                compare_ref = 'HEAD'
-            else:
-                return {
-                    'ok': True,
-                    'message': f'{target} is already up to date on the {channel} channel.',
-                    'target': target,
-                    'up_to_date': True,
-                    'channel': channel,
-                }
-
-        # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
-        # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
-        # switch-back-to-stable-while-ahead case. A ref that is a descendant of
-        # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
-        # allowed. Refs on a divergent line (neither ancestor nor descendant) are
-        # the legitimate force-update case (conflict/diverged recovery) and are
-        # also allowed — the guard fires ONLY on a pure-ancestor rewind.
-        if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
-            return {
-                'ok': False,
-                'message': (
-                    f'{target} is already ahead of the {channel} channel '
-                    f'({compare_ref}); refusing to rewind the checkout. '
-                    'Switching to a slower channel keeps your current version '
-                    'until that channel catches up.'
-                ),
-                'target': target,
-                'channel': channel,
-                'refused_rewind': True,
-            }
-        if not _discard_local_changes(path, compare_ref):
-            return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
-
-        with _cache_lock:
-            _update_cache['checked_at'] = 0
-
-        if target == 'agent':
-            gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-            if not gateway_ok:
-                return {
-                    'ok': False,
-                    'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                    'target': target,
-                    'gateway_restart': gateway_result.get('status'),
-                }
-
-        _schedule_restart()
-
-        response = {
-            'ok': True,
-            'message': f'{target} force-updated to {compare_ref}',
-            'target': target,
-            'restart_scheduled': True,
+    # --force so a remote re-tag (e.g. squash-merge that re-points an
+    # existing release tag) doesn't jam the apply path with "would clobber
+    # existing tag". See #2756.
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    if not fetch_ok:
+        return {
+            'ok': False,
+            'message': _apply_fetch_failure_message(
+                fetch_out,
+                'Could not reach the remote repository. Check your connection.',
+            ),
         }
-        if target == 'agent':
-            response['gateway_restart'] = gateway_result.get('status')
-        return response
-    finally:
-        _apply_lock.release()
+
+    compare_ref = _select_apply_compare_ref(path, channel, target)
+    # Stable channel, already up to date on the promoted subset: nothing to
+    # force to. Do NOT fall back to origin/master (firehose). See
+    # _select_apply_compare_ref channel semantics.
+    if compare_ref is None:
+        dirty_state = None
+        if target == 'webui' and channel == 'stable':
+            dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
+        if dirty_state is True:
+            compare_ref = 'HEAD'
+        else:
+            return {
+                'ok': True,
+                'message': f'{target} is already up to date on the {channel} channel.',
+                'target': target,
+                'up_to_date': True,
+                'channel': channel,
+            }
+
+    # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
+    # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
+    # switch-back-to-stable-while-ahead case. A ref that is a descendant of
+    # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
+    # allowed. Refs on a divergent line (neither ancestor nor descendant) are
+    # the legitimate force-update case (conflict/diverged recovery) and are
+    # also allowed — the guard fires ONLY on a pure-ancestor rewind.
+    if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
+        return {
+            'ok': False,
+            'message': (
+                f'{target} is already ahead of the {channel} channel '
+                f'({compare_ref}); refusing to rewind the checkout. '
+                'Switching to a slower channel keeps your current version '
+                'until that channel catches up.'
+            ),
+            'target': target,
+            'channel': channel,
+            'refused_rewind': True,
+        }
+    if not _discard_local_changes(path, compare_ref):
+        return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
+
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+
+    if target == 'agent':
+        gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+        if not gateway_ok:
+            return {
+                'ok': False,
+                'message': _agent_gateway_restart_failure_message(target, gateway_result),
+                'target': target,
+                'gateway_restart': gateway_result.get('status'),
+            }
+
+    _schedule_restart()
+
+    response = {
+        'ok': True,
+        'message': f'{target} force-updated to {compare_ref}',
+        'target': target,
+        'restart_scheduled': True,
+    }
+    if target == 'agent':
+        response['gateway_restart'] = gateway_result.get('status')
+    return response
 
 
-def apply_update(target, channel=None):
-    """Stash, pull --ff-only, pop for the given target repo."""
+def apply_update(target, channel=None, *, force_active_runs: bool = False):
+    """Stash, pull --ff-only, pop for the given target repo.
+
+    Refuses while WebUI-owned runs are active unless ``force_active_runs``
+    (#7293); see ``_run_fenced_update``.
+    """
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
-    blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
-        return _restart_blocked_response(target, blocker_snapshot)
-
-    if not _apply_lock.acquire(blocking=False):
-        return {'ok': False, 'message': 'Update already in progress'}
-    try:
-        return _apply_update_inner(target, channel)
-    finally:
-        _apply_lock.release()
+    return _run_fenced_update(
+        target, force_active_runs, lambda: _apply_update_inner(target, channel)
+    )
 
 
 _apply_jobs = {}  # job_id -> {'done': bool, 'result': dict|None}; newest last
 _apply_jobs_lock = threading.Lock()
 
 
-def start_apply_job(target, channel=None):
+def start_apply_job(target, channel=None, force_active_runs=False):
     """Run apply_update in a thread so a slow pull never rides one HTTP request.
 
     Proxies cut long requests (~100s) and a retry would then hit "already in
@@ -2207,7 +2602,7 @@ def start_apply_job(target, channel=None):
 
     def run():
         try:
-            result = apply_update(target, channel)
+            result = apply_update(target, channel, force_active_runs=force_active_runs)
         except Exception as exc:
             logger.exception('apply_update(%s) crashed', target)
             result = {'ok': False, 'message': f'Update failed unexpectedly: {type(exc).__name__}'}
@@ -2356,6 +2751,10 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         # the update landed, so continue to the restart steps.
         pull_ok = True
     if not pull_ok:
+        # Every pull-failure message below interpolates git's own output, and
+        # git echoes the remote URL (token included) when a pull dies. Scrub
+        # once here so no branch can leak it (#8198 follow-up).
+        pull_out = _sanitize_git_diagnostic(pull_out, limit=sys.maxsize)  # never truncate (redaction can lengthen)
         if _is_git_lock_error(pull_out):
             # Lock conflict during pull. If a stash was pushed for the local
             # modifications, attempt to restore it before returning so the

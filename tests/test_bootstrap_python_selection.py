@@ -1,7 +1,25 @@
 import pathlib
+import sys
 from unittest.mock import patch
 
 import bootstrap
+
+
+def test_probe_accepts_agent_that_activates_webui_dependencies_on_import(tmp_path):
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "run_agent.py").write_text(
+        "import builtins\nbuiltins.agent_dependencies_activated = True\nclass AIAgent: pass\n",
+        encoding="utf-8",
+    )
+    (agent_dir / "yaml.py").write_text(
+        "import builtins\n"
+        "if not getattr(builtins, 'agent_dependencies_activated', False):\n"
+        "    raise ImportError('agent dependencies not activated')\n",
+        encoding="utf-8",
+    )
+
+    assert bootstrap._python_can_run_webui_and_agent(sys.executable, agent_dir)
 
 
 def _repo_venv_python(repo_root: pathlib.Path) -> pathlib.Path:
@@ -138,6 +156,6 @@ def test_probe_imports_run_agent_before_yaml(monkeypatch, tmp_path):
 
     assert bootstrap._python_can_run_webui_and_agent("python", tmp_path / "agent")
     lines = seen["script"].splitlines()
-    assert lines.index("from run_agent import AIAgent") < lines.index("import yaml")
+    assert lines.index("from run_agent import AIAgent") < lines.index("    import yaml")
     assert seen["pythonpath"] == str(tmp_path / "agent")
 

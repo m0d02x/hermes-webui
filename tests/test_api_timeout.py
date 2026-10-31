@@ -219,10 +219,11 @@ def test_update_flows_keep_explicit_longer_timeouts():
     assert "await _runUpdateCheck(_checkBody)" in panels
     assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(body),timeoutMs:60000})" in src
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
-    # apply starts a server-side job and polls it (no long-held request); force
-    # builds its body inline to carry the offered channel and keeps 120s.
+    # apply starts a server-side job and polls it (no long-held request).
     assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(body),timeoutMs:30000})" in src
-    assert "api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000})" in src
+    # #7293: force builds its body in _forceBody (it may carry the explicit
+    # force_active_runs override) and keeps the 120s override.
+    assert "api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000})" in src
 
 
 def test_session_message_loads_keep_explicit_longer_timeouts():

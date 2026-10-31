@@ -1,7 +1,7 @@
 export type SettingValue = string | number | boolean;
 export type SettingState = Record<string, SettingValue>;
 
-export interface SettingOption { value: string; label: string; disabled?: boolean; provider?: string; model?: string; colors?: string[]; supportsFastTier?: boolean }
+export interface SettingOption { value: string; label: string; i18nKey?: string; disabled?: boolean; provider?: string; model?: string; colors?: string[]; supportsFastTier?: boolean }
 export interface ChipModel { id: string; label: string; visible: boolean; order: number; locked?: boolean; orderGroup?: string }
 export type SettingsChip = ChipModel;
 export interface NotificationPermissionState { status: string; supported: boolean; granted: boolean }
@@ -58,6 +58,7 @@ export interface SettingsHost {
   setNotificationPermission(status: NotificationPermissionState): void;
   setChipState(patch: Partial<{ tabs: ChipModel[]; composerControls: ChipModel[]; situationalControls: ChipModel[] }>): void;
   setWorkspacePanelOpen(open: boolean): void;
+  setChatTodosInChat(checked: boolean): void;
   requestNotificationPermission(): void;
   sendTestNotification(): void;
   openAdvancedModel(task: string | null): void;
