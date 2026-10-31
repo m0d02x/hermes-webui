@@ -111,6 +111,8 @@ def test_cached_update_status_does_not_drop_agent_info_when_reenabled(monkeypatc
     from api import updates
 
     cached_agent = {"name": "agent", "behind": 2}
+    # A finished job left by an earlier test would be served instead of the cache.
+    monkeypatch.setattr(updates, "_check_jobs", {})
     monkeypatch.setattr(
         updates,
         "_update_cache",
