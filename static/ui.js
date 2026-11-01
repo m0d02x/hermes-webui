@@ -11744,6 +11744,47 @@ function _renderQueueChips(sid){
       badges.appendChild(mb);
     }
     // Profile badge removed — drain cannot server-switch profiles so badge was misleading
+    const _liveIdx=()=>{const liveQ=_getSessionQueue(sid,false);return {liveQ,idx:_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i};};
+    const _actionBtn=(icon,label,title,onClick)=>{
+      const b=document.createElement('button');
+      b.className='queue-card-btn queue-card-row-action';
+      b.setAttribute('draggable','false');
+      b.title=title;
+      b.innerHTML=li(icon,12)+'<span>'+label+'</span>';
+      b.onclick=async()=>{if(b.disabled) return;b.disabled=true;b.blur();try{await onClick();}finally{b.disabled=false;}};
+      return b;
+    };
+    // Steer: take the entry out of the queue first, then hand it to _trySteer, which
+    // owns the text from there (on failure it restores it into the composer; on a
+    // Gateway fallback it re-queues a fresh copy). Re-insert only if the composer
+    // did not take the text back, so a failed steer never duplicates or loses it.
+    const steerBtn=_actionBtn('compass','Steer','Steer the current response with this message now',async()=>{
+      if(!S.activeStreamId||typeof _trySteer!=='function'){showToast(t('steer_fail_not_running'),2500);return;}
+      const {liveQ,idx}=_liveIdx();
+      if(idx===-1) return;
+      const [taken]=liveQ.splice(idx,1);
+      _saveAndRefresh();
+      if(await _trySteer(entryText,false,_files)) return;
+      const inp=$('msg');
+      if(inp&&inp.value===entryText) return;
+      const q2=_getSessionQueue(sid,true);
+      q2.splice(Math.min(idx,q2.length),0,taken);
+      _saveAndRefresh();
+    });
+    // Send now: move to the front and stop the current turn; the setBusy(false)
+    // drain then sends it. Idle with a leftover queue → setBusy(false) drains now.
+    const sendNowBtn=_actionBtn('arrow-up','Send now','Stop the current response and send this message now',async()=>{
+      const {liveQ,idx}=_liveIdx();
+      if(idx===-1) return;
+      if(idx>0) liveQ.unshift(liveQ.splice(idx,1)[0]);
+      _saveAndRefresh();
+      if(S.activeStreamId){
+        if(!await cancelStream('queue-send-now')) showToast(t('cancel_failed'),null,'error');
+      }else if(!S.busy){
+        setBusy(false);
+      }
+    });
+    if(entry&&String(entry.goal_continuation_id||'').trim()) steerBtn.style.display='none';
     // Delete button
     const delBtn=document.createElement('button');
     delBtn.className='queue-card-icon-btn';
@@ -11763,6 +11804,8 @@ function _renderQueueChips(sid){
     row.appendChild(drag);
     row.appendChild(msgSpan);
     if(badges.childNodes.length) row.appendChild(badges);
+    row.appendChild(steerBtn);
+    row.appendChild(sendNowBtn);
     row.appendChild(delBtn);
     inner.appendChild(row);
   });
