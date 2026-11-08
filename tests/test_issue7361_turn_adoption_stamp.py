@@ -189,3 +189,30 @@ def test_adoption_preserves_existing_source_on_agent_row():
         [], rows, identity, identity["text"], "webui")
 
     assert result[0]["_source"] == "process_wakeup"
+
+
+def test_settle_stamps_source_on_token_only_previous_display_row():
+    """Real entry point: a previous display row carrying only the turn token
+    (no _source) must leave settlement stamped, or the wakeup renders as a raw
+    user bubble. Fails before the fix: the existing-row keep path only set the
+    token."""
+    import types
+    from api.streaming import _settle_result_messages
+    identity = _wakeup_identity()
+    body, ts = identity["text"], identity["timestamp"]
+    token_only = {"role": "user", "content": body, "timestamp": ts,
+                  "_active_turn_token": identity["token"]}
+    agent_row = {"role": "user", "content": body, "timestamp": ts,
+                 "api_content": "[Workspace::v1: /w]\n" + body, "_row_id": 9}
+    session = types.SimpleNamespace(
+        session_id="s1", messages=[dict(token_only)], context_messages=[],
+        pending_user_message=body, pending_started_at=ts,
+        pending_user_source="process_wakeup", pending_attachments=[])
+    _settle_result_messages(
+        session, session.messages, [],
+        [agent_row, {"role": "assistant", "content": "done", "timestamp": ts + 1}],
+        body, "process_wakeup", identity)
+    users = [m for m in session.messages if m.get("role") == "user"]
+    assert len(users) == 1
+    assert users[0]["_source"] == "process_wakeup"
+    assert users[0]["_wakeup_meta"]["type"] == "completion"

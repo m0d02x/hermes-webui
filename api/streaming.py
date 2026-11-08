@@ -2502,13 +2502,20 @@ def _active_turn_has_checkpoint(messages, identity):
 
 
 def _mark_active_turn_checkpoint(message, identity):
+    # The token proves this row IS the pending turn, so it must also carry the
+    # turn's provenance; a token-only row renders a process_wakeup as a raw
+    # user bubble once the pending fields clear.
     if (
         isinstance(message, dict)
         and message.get('role') == 'user'
         and isinstance(identity, dict)
         and identity.get('token')
     ):
-        message['_active_turn_token'] = identity['token']
+        stamp_message_source(
+            message,
+            identity.get('source') or 'webui',
+            active_turn_token=identity['token'],
+        )
     return message
 
 
@@ -2517,6 +2524,9 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, all
     if not isinstance(identity, dict):
         return messages, False
     if _active_turn_has_checkpoint(messages, identity):
+        for message in messages:
+            if _active_turn_token_matches(message, identity):
+                _mark_active_turn_checkpoint(message, identity)
         return messages, True
     if not allow_index_fallback:
         return messages, False
