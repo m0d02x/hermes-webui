@@ -15783,6 +15783,10 @@ def _save_saved_prompts(prompts: list) -> None:
 _INDEX_SHELL_CACHE: dict = {}
 _INDEX_SHELL_CACHE_LOCK = threading.Lock()
 
+# Template tokens look like __NAME__; the lookarounds skip real JS globals such
+# as window.__HERMES_CONFIG__.
+_UNREPLACED_SHELL_PLACEHOLDER_RE = re.compile(r"(?<![\w.$])__[A-Z][A-Z0-9_]*__(?![\w$])")
+
 
 def _render_index_shell_base() -> str:
     """Return static/index.html with the process-constant tokens substituted.
@@ -16546,6 +16550,13 @@ def handle_get(handler, parsed) -> bool:
                     json.dumps(csp_img_extra_sources(extra_img_src)).replace("<", "\\u003c"),
                 )
             )
+            leftover = _UNREPLACED_SHELL_PLACEHOLDER_RE.search(html)
+            if leftover:
+                # index.html on disk is newer than this running process: the
+                # placeholder would reach the browser as a bare JS identifier,
+                # abort the config script, skip the CSRF fetch wrapper, and make
+                # every write 403 as "Session expired". Fail as "restarting".
+                raise RuntimeError(f"index.html placeholder not substituted by this server: {leftover.group(0)}")
             return t(
                 handler,
                 inject_extension_tags(html),
