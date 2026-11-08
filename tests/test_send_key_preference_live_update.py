@@ -203,6 +203,16 @@ def test_enter_mode_shift_enter_does_not_send(page):
     assert _send_count(page) == 0
 
 
+@pytest.mark.parametrize("modifier", ["Meta", "Control"])
+def test_enter_mode_modified_enter_inserts_newline_at_selection(page, modifier):
+    _set_send_key(page, "enter")
+    page.fill("#msg", "hello world")
+    page.evaluate("document.getElementById('msg').setSelectionRange(5, 6)")
+    page.press("#msg", f"{modifier}+Enter")
+    assert page.input_value("#msg") == "hello\nworld"
+    assert _send_count(page) == 0
+
+
 def test_shift_enter_mode_plain_enter_does_not_send(page):
     _set_send_key(page, "shift+enter")
     _press_enter(page)

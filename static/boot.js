@@ -3122,6 +3122,14 @@ function _isNumpadEnter(e){
 // of inserting a newline (issue: mobile Enter sends on fresh page load).
 try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
 $('msg').addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)&&window._sendKey==='enter'&&!_isTouchOnlyDevice()){
+    if(_isImeEnter(e))return;
+    e.preventDefault();
+    const input=e.currentTarget;
+    input.setRangeText('\n',input.selectionStart,input.selectionEnd,'end');
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+    return;
+  }
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
   const dropdownOpen=dd&&dd.classList.contains('open');
