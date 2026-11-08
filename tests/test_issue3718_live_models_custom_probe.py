@@ -113,6 +113,150 @@ _BASE_PROVIDER = {
     "api_key": "sk-test",
 }
 
+@pytest.mark.parametrize("agent_catalog", [False, True])
+@pytest.mark.parametrize("full_first", [False, True])
+def test_full_catalog_is_separate_from_filtered_cache(monkeypatch, agent_catalog, full_first):
+    import api.routes as routes
+
+    provider = dict(_BASE_PROVIDER, model="sticky", models=["chat-a", "offline"])
+    _run_live_models(monkeypatch, routes, provider, catalog=_LIVE_CATALOG)
+    routes._clear_live_models_cache()
+    _install_provider_model_ids(monkeypatch, lambda _: list(_LIVE_CATALOG) if agent_catalog else [])
+    normal = urlparse("/api/models/live?provider=custom:test-gateway")
+    full = urlparse("/api/models/live?provider=custom:test-gateway&all=1")
+    first, second = (full, normal) if full_first else (normal, full)
+    results = {first.query: routes._handle_live_models(object(), first),
+               second.query: routes._handle_live_models(object(), second)}
+    assert _ids(results[full.query]) == _LIVE_CATALOG
+    assert _ids(results[normal.query]) == ["chat-a", "offline"]
+    assert provider["models"] == ["chat-a", "offline"]
+
+@pytest.mark.parametrize(
+    ("base_url", "api_key", "expected_url", "authorization"),
+    [
+        ("http://127.0.0.1:11434/v1", None, "http://127.0.0.1:11434/v1/models", None),
+        ("http://localhost:1234", "", "http://localhost:1234/v1/models", None),
+        ("http://[::1]:8080/v1/", "   ", "http://[::1]:8080/v1/models", None),
+        ("http://192.168.1.10:8000/v1", None, "http://192.168.1.10:8000/v1/models", None),
+        ("https://gateway.example/v1", "sk-test", "https://gateway.example/v1/models", "Bearer sk-test"),
+    ],
+)
+def test_full_catalog_probes_configured_local_without_empty_authorization(
+    monkeypatch, base_url, api_key, expected_url, authorization
+):
+    import urllib.request
+    import api.config as config
+    import api.routes as routes
+
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: False)
+    monkeypatch.setattr(config, "_host_gated_env_key", lambda _url: None)
+    provider = {"name": "Test Gateway", "base_url": base_url, "api_key": api_key,
+                "models": ["chat-a"]}
+    _run_live_models(monkeypatch, routes, provider, catalog=_LIVE_CATALOG)
+    routes._clear_live_models_cache()
+    requests = []
+
+    def fake_urlopen(req, timeout=None):
+        requests.append((req, timeout))
+        return _FakeResponse(json.dumps({"data": [{"id": mid} for mid in _LIVE_CATALOG]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    full = urlparse("/api/models/live?provider=custom:test-gateway&all=1")
+    result = routes._handle_live_models(object(), full)
+    assert _ids(result) == _LIVE_CATALOG
+    assert len(requests) == 1
+    req, timeout = requests[0]
+    assert req.full_url == expected_url
+    assert req.get_method() == "GET"
+    assert req.get_header("Authorization") == authorization
+    if authorization is None:
+        assert "authorization" not in {name.lower() for name, _ in req.header_items()}
+    assert timeout == config.CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+
+    normal = urlparse("/api/models/live?provider=custom:test-gateway")
+    assert _ids(routes._handle_live_models(object(), normal)) == ["chat-a"]
+
+
+@pytest.mark.parametrize(
+    "provider_changes",
+    [
+        {"base_url": "https://gateway.example/v1"},
+        {"base_url": "http://localhost.example/v1"},
+        {"base_url": "file://127.0.0.1/v1"},
+        {"api_key": "${MISSING_CATALOG_KEY}"},
+        {"key_env": "MISSING_CATALOG_KEY"},
+        {"key_cmd": "unavailable-command"},
+        {"credential_pool": []},
+    ],
+)
+def test_full_catalog_does_not_probe_untrusted_or_unresolved_keyless_provider(
+    monkeypatch, provider_changes
+):
+    import urllib.request
+    import api.config as config
+    import api.routes as routes
+
+    monkeypatch.delenv("MISSING_CATALOG_KEY", raising=False)
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: False)
+    monkeypatch.setattr(config, "_host_gated_env_key", lambda _url: None)
+    provider = {"name": "Test Gateway", "base_url": "http://127.0.0.1:11434/v1",
+                "models": ["chat-a"], **provider_changes}
+    _run_live_models(monkeypatch, routes, provider, catalog=_LIVE_CATALOG)
+    routes._clear_live_models_cache()
+    requests = []
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: requests.append(req))
+
+    full = urlparse("/api/models/live?provider=custom:test-gateway&all=1")
+    result = routes._handle_live_models(object(), full)
+    assert result.get("error") == "catalog_unavailable"
+    assert _ids(result) == []
+    assert requests == []
+
+
+def test_full_catalog_never_uses_active_endpoint_for_unknown_custom_provider(monkeypatch):
+    import urllib.request
+    import api.config as config
+    import api.routes as routes
+
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: False)
+    _run_live_models(monkeypatch, routes, dict(_BASE_PROVIDER), catalog=_LIVE_CATALOG)
+    config.get_config()["model"].update({"base_url": "http://127.0.0.1:1234/v1", "api_key": "active-key"})
+    routes._clear_live_models_cache()
+    requests = []
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: requests.append(req))
+
+    full = urlparse("/api/models/live?provider=custom:unknown&all=1")
+    result = routes._handle_live_models(object(), full)
+    assert result.get("error") == "catalog_unavailable"
+    assert requests == []
+
+
+def test_full_catalog_failure_and_empty_are_not_cached(monkeypatch):
+    import api.routes as routes
+
+    provider = dict(_BASE_PROVIDER, models=["chat-a"])
+    _run_live_models(monkeypatch, routes, provider, catalog=[], fail=True)
+    routes._clear_live_models_cache()
+    full = urlparse("/api/models/live?provider=custom:test-gateway&all=1")
+    failed = routes._handle_live_models(object(), full)
+    assert failed.get("error") and _ids(failed) == []
+    _install_live_catalog(monkeypatch, routes, [])
+    assert _ids(routes._handle_live_models(object(), full)) == []
+    _install_live_catalog(monkeypatch, routes, _LIVE_CATALOG)
+    assert _ids(routes._handle_live_models(object(), full)) == _LIVE_CATALOG
+
+
+def test_all_flag_does_not_change_non_custom_provider(monkeypatch):
+    import api.routes as routes
+    import api.config as config
+
+    _run_live_models(monkeypatch, routes, dict(_BASE_PROVIDER), catalog=[])
+    monkeypatch.setattr(config, "_MODEL_PICKER_OVERFLOW_THRESHOLD", 2)
+    monkeypatch.setattr(config, "_MODEL_PICKER_VISIBLE_TARGET", 1)
+    _install_provider_model_ids(monkeypatch, lambda _: ["one", "two", "three"])
+    result = routes._handle_live_models(object(), urlparse("/api/models/live?provider=other&all=1"))
+    assert _ids(result) == ["one"]
+
 
 @pytest.mark.parametrize(
     "models_value",

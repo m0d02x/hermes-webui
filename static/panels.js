@@ -11843,13 +11843,14 @@ function _buildProviderCard(p){
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
     hint.textContent=p.is_custom
-      ? 'Custom provider loaded from config.yaml / hermes model. Edit it from the CLI or config file.'
+      ? 'Custom provider loaded from config.yaml. Pick the models offered in the picker here; keys and the rest of the entry stay CLI/config-file managed.'
       : 'Provider is managed outside the WebUI.';
     body.appendChild(hint);
   }
 
-  // Model list — show when provider has known models
-  if(modelCount>0){
+  let loadCatalog=null;
+  // Custom providers need the editor even before any models are known.
+  if(modelCount>0||p.is_custom){
     const modelSection=document.createElement('div');
     modelSection.className='provider-card-models';
     const modelLabel=document.createElement('div');
@@ -11859,28 +11860,191 @@ function _buildProviderCard(p){
     const modelList=document.createElement('div');
     modelList.className='provider-card-model-tags';
     const renderedModels=Array.isArray(p.models)?p.models:[];
-    for(const m of renderedModels){
-      const tag=document.createElement('span');
-      tag.className='provider-card-model-tag';
-      tag.textContent=m.id||m.label||m;
-      modelList.appendChild(tag);
+    if(p.is_custom){
+      modelList.classList.toggle('provider-card-model-tags-editable',true);
+      const modelIds=new Set();
+      const initialIds=renderedModels.map(m=>m&&typeof m==='object'?(m.id||m.label):m).filter(id=>typeof id==='string'&&id);
+      const savedIds=Array.isArray(p.saved_model_ids)?p.saved_model_ids:[];
+      const savedMode=p.models_mode==='list'&&savedIds.length>0?'list':'all';
+      const state={mode:savedMode,sel:new Set(savedMode==='list'?savedIds:[]),dirty:false};
+      const modeRow=document.createElement('div');
+      modeRow.className='provider-card-model-mode';
+      const modeButton=(label,mode)=>{
+        const b=document.createElement('button');
+        b.type='button';
+        b.className='provider-card-btn provider-card-btn-ghost provider-card-model-mode-btn';
+        b.dataset.mode=mode;
+        b.textContent=label;
+        b.onclick=()=>{
+          if(state.mode===mode) return;
+          state.mode=mode;
+          state.dirty=true;
+          render();
+        };
+        return b;
+      };
+      modeRow.appendChild(modeButton('All models','all'));
+      modeRow.appendChild(modeButton('Whitelist','list'));
+      const hint=document.createElement('div');
+      hint.className='provider-card-hint';
+      const search=document.createElement('input');
+      search.type='search';
+      search.className='provider-card-input provider-card-model-input';
+      search.placeholder='Filter models';
+      search.setAttribute('aria-label','Filter models');
+      search.autocomplete='off';
+      search.spellcheck=false;
+      search.addEventListener('input',()=>render());
+      search.addEventListener('keydown',e=>{ if(e.key==='Enter') e.preventDefault(); });
+      const catalogStatus=document.createElement('div');
+      catalogStatus.className='provider-card-hint provider-card-model-catalog-status';
+      catalogStatus.setAttribute('role','status');
+      const filterStatus=document.createElement('div');
+      filterStatus.className='provider-card-hint';
+      filterStatus.setAttribute('role','status');
+      const retryBtn=document.createElement('button');
+      retryBtn.type='button';
+      retryBtn.className='provider-card-btn provider-card-btn-ghost';
+      retryBtn.textContent='Retry';
+      retryBtn.style.display='none';
+      retryBtn.onclick=()=>{ catalogLoaded=false; loadCatalog(); };
+      const addRow=document.createElement('div');
+      addRow.className='provider-card-row';
+      addRow.style.gap='6px';
+      const addInput=document.createElement('input');
+      addInput.type='text';
+      addInput.className='provider-card-input provider-card-model-input';
+      addInput.placeholder='Add model id';
+      addInput.setAttribute('aria-label','Add model id');
+      addInput.autocomplete='off';
+      addInput.spellcheck=false;
+      const addBtn=document.createElement('button');
+      addBtn.type='button';
+      addBtn.className='provider-card-btn provider-card-btn-ghost';
+      addBtn.textContent='Add';
+      const addModel=()=>{
+        const id=addInput.value.trim();
+        if(!id) return;
+        state.mode='list';
+        state.sel.add(id);
+        state.dirty=true;
+        addInput.value='';
+        search.value='';
+        addTag(id);
+        render();
+      };
+      addBtn.onclick=addModel;
+      addInput.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); addModel(); } });
+      addRow.append(addInput,addBtn);
+      const saveRow=document.createElement('div');
+      saveRow.className='provider-card-row';
+      saveRow.style.marginTop='2px';
+      let savingModels=false;
+      const modelSaveBtn=document.createElement('button');
+      modelSaveBtn.type='button';
+      modelSaveBtn.className='provider-card-btn';
+      modelSaveBtn.textContent='Save models';
+      modelSaveBtn.onclick=async()=>{
+        if(savingModels) return;
+        savingModels=true;
+        render();
+        try{ await _saveCustomProviderModels(p.id,state.mode==='all'?[]:[...state.sel],state.mode==='all',modelSaveBtn); }
+        finally{ savingModels=false; render(); }
+      };
+      saveRow.appendChild(modelSaveBtn);
+      const render=()=>{
+        const allMode=state.mode==='all';
+        const query=search.value.trim().toLowerCase();
+        let visible=0;
+        for(const b of modeRow.children){
+          const active=b.dataset.mode===state.mode;
+          b.classList.toggle('is-active',active);
+          b.disabled=savingModels;
+          b.setAttribute('aria-pressed',active?'true':'false');
+        }
+        for(const tag of modelList.querySelectorAll('.provider-card-model-tag-toggle')){
+          const on=allMode||state.sel.has(tag.dataset.modelId);
+          tag.classList.toggle('is-on',on);
+          tag.setAttribute('aria-pressed',on?'true':'false');
+          tag.disabled=savingModels;
+          const matches=tag.dataset.modelId.toLowerCase().includes(query);
+          tag.style.display=matches?'':'none';
+          if(matches) visible++;
+        }
+        filterStatus.textContent=query&&!visible?'No models match your filter.':'';
+        addRow.style.display=allMode?'none':'';
+        addInput.disabled=savingModels;
+        addBtn.disabled=savingModels;
+        hint.textContent=allMode
+          ? 'Every model this endpoint advertises is offered. Pick a model or choose Whitelist to expose only chosen models.'
+          : (state.sel.size+' model'+(state.sel.size===1?'':'s')+' whitelisted'+(state.dirty?' — save to apply':''));
+        modelSaveBtn.disabled=savingModels||!state.dirty||(!allMode&&state.sel.size===0);
+      };
+      const addTag=(id)=>{
+        if(typeof id!=='string'||!id||modelIds.has(id)) return;
+        modelIds.add(id);
+        const tag=document.createElement('button');
+        tag.type='button';
+        tag.dataset.modelId=id;
+        tag.className='provider-card-model-tag provider-card-model-tag-toggle';
+        tag.textContent=id;
+        tag.onclick=()=>{
+          if(state.mode==='all'){
+            state.mode='list';
+            state.sel=new Set([id]);
+          }else if(state.sel.has(id)) state.sel.delete(id);
+          else state.sel.add(id);
+          state.dirty=true;
+          render();
+        };
+        modelList.appendChild(tag);
+      };
+      for(const id of initialIds) addTag(id);
+      for(const id of state.sel) addTag(id);
+      let catalogLoading=false;
+      let catalogLoaded=false;
+      loadCatalog=async()=>{
+        if(catalogLoading||catalogLoaded) return;
+        catalogLoading=true;
+        retryBtn.style.display='none';
+        catalogStatus.textContent='Loading live models…';
+        catalogStatus.setAttribute('aria-busy','true');
+        try{
+          const data=await api('/api/models/live?provider='+encodeURIComponent(p.id)+'&all=1',{retries:0,timeoutToast:false,cache:'no-store'});
+          if(!data||data.error||!Array.isArray(data.models)) throw new Error('Catalog unavailable');
+          for(const model of data.models) addTag(model&&typeof model==='object'?(model.id||model.label):model);
+          catalogLoaded=true;
+          catalogStatus.textContent=data.models.length?'':'No live models found. You can retry or add a model ID manually.';
+          if(!data.models.length) retryBtn.style.display='';
+          render();
+        }catch(_e){
+          catalogStatus.textContent='Live models unavailable. You can still edit the whitelist or add a model ID.';
+          retryBtn.style.display='';
+        }finally{
+          catalogStatus.setAttribute('aria-busy','false');
+          catalogLoading=false;
+        }
+      };
+      modelSection.append(modeRow,hint,search,catalogStatus,retryBtn,filterStatus,modelList,addRow,saveRow);
+      render();
+    }else{
+      for(const m of renderedModels){
+        const tag=document.createElement('span');
+        tag.className='provider-card-model-tag';
+        tag.textContent=m.id||m.label||m;
+        modelList.appendChild(tag);
+      }
+      const totalCount=Number.isFinite(p.models_total)?p.models_total:renderedModels.length;
+      const hiddenCount=Math.max(0,totalCount-renderedModels.length);
+      if(hiddenCount>0){
+        const more=document.createElement('span');
+        more.className='provider-card-model-tag provider-card-model-tag-more';
+        more.textContent='+'+hiddenCount+' more';
+        more.title='The /model slash command can autocomplete every model in this provider\'s catalog.';
+        modelList.appendChild(more);
+      }
+      modelSection.appendChild(modelList);
     }
-    // When the rendered list is a strict subset of the total catalog (Nous
-    // Portal large-tier accounts hit this with ~400-model catalogs), show
-    // a "+N more" trailing pill so the user knows the picker is intentionally
-    // capped — and they can still reach the full catalog via the /model
-    // slash command (its autocomplete consumes the un-trimmed list from
-    // /api/models's extra_models field). #1567.
-    const totalCount=Number.isFinite(p.models_total)?p.models_total:renderedModels.length;
-    const hiddenCount=Math.max(0, totalCount - renderedModels.length);
-    if(hiddenCount>0){
-      const more=document.createElement('span');
-      more.className='provider-card-model-tag provider-card-model-tag-more';
-      more.textContent='+'+hiddenCount+' more';
-      more.title='The /model slash command can autocomplete every model in this provider\'s catalog.';
-      modelList.appendChild(more);
-    }
-    modelSection.appendChild(modelList);
     body.appendChild(modelSection);
   }
 
@@ -11908,7 +12072,10 @@ function _buildProviderCard(p){
     // Don't toggle when clicking inside body (defensive; body isn't inside header)
     if(e.target.closest('.provider-card-body')) return;
     card.classList.toggle('open');
-    if(card.classList.contains('open')) setTimeout(()=>focusInput&&focusInput.focus(),0);
+    if(card.classList.contains('open')){
+      if(loadCatalog) loadCatalog();
+      setTimeout(()=>focusInput&&focusInput.focus(),0);
+    }
   });
   return card;
 }
@@ -12129,8 +12296,28 @@ function _refreshModelDropdownsAfterProviderChange(){
     const modelsReady=typeof window._ensureModelDropdownReady==='function'
       ?(window._modelDropdownReady=null,Promise.resolve(window._ensureModelDropdownReady()))
       :typeof populateModelDropdown==='function'?Promise.resolve(populateModelDropdown()):Promise.resolve();
-    modelsReady.then(()=>window._refreshSettingsModelOptions()).catch(()=>{});
-  }catch(_e){}
+    return modelsReady.then(()=>window._refreshSettingsModelOptions()).catch(()=>{});
+  }catch(_e){return Promise.resolve();}
+}
+
+async function _saveCustomProviderModels(providerId, models, discover, btn){
+  if(btn) btn.disabled=true;
+  try{
+    const res=await api('/api/providers/custom-models',{method:'POST',retries:0,body:JSON.stringify({provider:providerId,models,discover})});
+    if(res.ok){
+      showToast(discover
+        ?(t('providers_all_models_enabled')||'All models enabled')
+        :(t('providers_models_saved')||('Saved '+models.length+' models')));
+      await _refreshModelDropdownsAfterProviderChange();
+      await loadProvidersPanel();
+    }else{
+      showToast(res.error||'Failed to save models');
+      if(btn) btn.disabled=false;
+    }
+  }catch(e){
+    showToast(e.message||'Failed to save models');
+    if(btn) btn.disabled=false;
+  }
 }
 
 async function _refreshProviderModels(providerId, btn){
@@ -12141,7 +12328,8 @@ async function _refreshProviderModels(providerId, btn){
     const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
       showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
-      _refreshModelDropdownsAfterProviderChange();
+      await _refreshModelDropdownsAfterProviderChange();
+      await loadProvidersPanel();
     }else{
       showToast(res.error||'Failed to refresh models');
     }

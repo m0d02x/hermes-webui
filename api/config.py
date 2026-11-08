@@ -7189,6 +7189,44 @@ def _endpoint_advertised_model_ids(provider_id: str | None) -> frozenset | None:
     return memo[1].get(slug)
 
 
+def _published_provider_model_ids(provider_id: str | None) -> list[str] | None:
+    """Ordered model ids of ``provider_id``'s group in the published catalog.
+
+    Same lock-free, fingerprint-guarded snapshot read as
+    ``_endpoint_advertised_model_ids`` but order-preserving and with the
+    ``@<slug>:`` picker routing prefix stripped, so the Providers card can show
+    what the picker shows. ``None`` when cold, foreign-profile, or no group.
+    """
+    provenance = _models_cache_provenance
+    if provenance is None:
+        return None
+    snapshot, published_fp = provenance
+    if snapshot is None:
+        return None
+    try:
+        if published_fp != _models_cache_source_fingerprint():
+            return None
+        groups = snapshot.get("groups", []) or []
+    except Exception:
+        return None
+    slug = str(provider_id or "").strip().lower()
+    prefix = f"@{slug}:"
+    ids: list[str] = []
+    found = False
+    for group in groups:
+        if not isinstance(group, dict) or str(group.get("provider_id") or "").strip().lower() != slug:
+            continue
+        found = True
+        for bucket in ("models", "extra_models"):
+            for m in group.get(bucket) or []:
+                mid = str(m.get("id") or "") if isinstance(m, dict) else ""
+                if mid.lower().startswith(prefix):
+                    mid = mid[len(prefix):]
+                if mid and mid not in ids:
+                    ids.append(mid)
+    return ids if found else None
+
+
 # Hard wall-clock budget for a COLD live provider-catalog rebuild when it is
 # run from a foreground request path. The live rebuild does one network probe
 # per detected provider (Copilot token-exchange HTTPS, OpenRouter /v1/models,
@@ -10616,7 +10654,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not (entry.get("name") or "").strip():
                         continue
                     configured_models = entry.get("models")
-                    if isinstance(configured_models, (dict, list)) and len(configured_models) > 0:
+                    if (
+                        isinstance(configured_models, (dict, list))
+                        and len(configured_models) > 0
+                        and not _provider_models_are_discovered_catalog(entry)
+                    ):
                         continue
                     count += 1
             # The LM Studio provider-group branch re-probes the same
@@ -10779,6 +10821,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cp_has_configured_models = (
                         isinstance(_cp_configured_models, (dict, list))
                         and len(_cp_configured_models) > 0
+                        and not _provider_models_are_discovered_catalog(_cp)
                     )
                     if (
                         _active_probe_owner
@@ -10794,11 +10837,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         # Skip the live /v1/models probe when an allowlist
                         # exists — the curated list wins and probe failures
                         # should not surface as a user-facing diagnostic in
-                        # that case. Still respect any pre-warm result that
-                        # ``auto_detected_models_by_provider`` already
-                        # populated (cheap to keep).
-                        if _live_models is None:
-                            _live_models = []
+                        # that case. The active endpoint's own probe pre-warms
+                        # ``auto_detected_models_by_provider`` for this slug;
+                        # that must not re-add what the allowlist left out, so
+                        # a pinned entry never consumes it.
+                        _live_models = []
                     elif _live_models is None:
                         _live_models, _live_error = _read_custom_endpoint_models(
                             _cp_base_url,
@@ -10827,18 +10870,29 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
 
                 # Collect configured model IDs as a fallback/sticky entry after live discovery.
+                # A discovered catalog is a snapshot, not an allowlist: once the live probe
+                # returned models, only the singular default stays sticky so ids the
+                # endpoint no longer advertises drop out.
                 _cp_model_ids: list[str] = []
                 _cp_model = _cp.get("model", "")
                 if _cp_model:
                     _cp_model_ids.append(_cp_model)
-                for _cp_model_id in _configured_model_ids(_cp.get("models")):
-                    if _cp_model_id not in _cp_model_ids:
-                        _cp_model_ids.append(_cp_model_id)
+                _cp_live_wins = (
+                    bool(_slug)
+                    and _provider_models_are_discovered_catalog(_cp)
+                    and bool(_named_custom_groups[_slug][1])
+                )
+                if not _cp_live_wins:
+                    for _cp_model_id in _configured_model_ids(_cp.get("models")):
+                        if _cp_model_id not in _cp_model_ids:
+                            _cp_model_ids.append(_cp_model_id)
 
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
                     if _cp_model and _dedup_key not in _seen_custom_ids:
-                        _cp_label = _get_label_for_model(_cp_model, [])
+                        # Same rule as probed rows (and the live endpoint): a
+                        # custom endpoint's model is labelled by its own id.
+                        _cp_label = _cp_model
                         _seen_custom_ids.add(_dedup_key)
                         if _slug:
                             detected_providers.add(_slug)

@@ -95,10 +95,52 @@ and forces the trade-off to be re-argued.
 deliberately treated as **not configured**, never as "allow nothing". The
 filter runs only on a non-empty allowlist because gating on declared-ness
 would emit an empty picker and make the provider unselectable — a harder
-failure than showing a few extra models, and unrecoverable from the UI
-(`custom_providers` has no WebUI write path; it is hand-edited in
-config.yaml). There is no deny-all use case: a provider the user wants hidden
+failure than showing a few extra models, and unrecoverable from the UI.
+(Since the Providers card gained the model picker, a pinned whitelist can be
+cleared from Settings → Providers → *All models*; an empty whitelist is still
+rejected there, so the rule above holds at both ends.)
+There is no deny-all use case: a provider the user wants hidden
 is removed from `custom_providers` outright.
+
+### Picking the whitelist from the WebUI
+
+`POST /api/providers/custom-models` (`api.providers.set_custom_provider_models`)
+writes the entry's whitelist, so a user does not have to hand-edit config.yaml:
+
+- `{"discover": true}` drops `discover_models` and marks `models_discovered: true`
+  — the live catalog is authoritative again (signal 1).
+- `{"models": [...], "discover": false}` writes exactly those ids as a list-shaped
+  `models:` and sets `discover_models: false` — signal 2's pinned branch.
+  An empty selection is rejected, matching the empty-allowlist rule above.
+
+The Providers card renders this as two modes (`All models` / `Whitelist`).
+`GET /api/providers` includes `saved_model_ids` for each custom provider: the
+effective saved allowlist, excluding the singular default and discovery or
+metadata-only mappings. An empty array means no allowlist is configured.
+Picking a model while in `All models` starts a whitelist containing just that
+model; `Add model id` adds an id the endpoint does not advertise.
+
+The whitelist editor can request `GET /api/models/live?provider=<id>&all=1` to
+browse the selected custom provider's unfiltered live catalog without changing
+the saved whitelist. The flag has no effect for other provider types. Filtered
+and full responses use separate profile- and provider-scoped cache entries.
+An unavailable full-catalog probe returns `error: "catalog_unavailable"` and
+an empty model list rather than presenting saved models as a live catalog.
+Successful empty responses and failures are not cached, so a retry can recover.
+Ordinary requests retain their filtered and fallback behavior.
+
+### One list for every surface
+
+The composer picker and ordinary `/api/models/live` requests honor the same
+custom-provider whitelist. The Providers editor additionally shows the full
+catalog so users can choose models without changing the whitelist first:
+
+- A pinned whitelist also filters the agent CLI's answer. For `custom:*` the agent
+  returns everything the configured relay serves, so the handler applies the
+  allowlist to it too, and a pinned entry ignores the active endpoint's pre-warm probe.
+- Custom routers are never capped by the featured-set limit, matching `/api/models`.
+- A custom endpoint's models are labelled by their own id on every path.
+- Saving a whitelist or refreshing a provider clears the 60s live-models cache.
 
 ### Probe failure / empty probe
 
@@ -117,7 +159,13 @@ models on a transient probe failure instead of emptying the picker.
   `models:` (not gated) and dict + `discover_models: false` (pinned),
   singular passthrough, malformed safety, discovered-catalog passthrough,
   `discover_models: false` pinning, and both fallback branches.
+- Full-catalog opt-in covers agent and direct probes, cache ordering, failures,
+  retry after empty responses, and the non-custom provider restriction.
 - `tests/test_issue7404_models_discovered_not_allowlist.py` — the
   `/api/models` side of the discovered-catalog contract.
+- `tests/test_custom_provider_discovered_refresh.py` — the named
+  `custom_providers` branch (live catalog beats a discovered snapshot; snapshot
+  only as probe-failure fallback), the Providers card following that catalog,
+  and the whitelist write path above.
 - `tests/test_byok_model_dropdown.py` — picker rendering, profile-scoped
   caching, and current-session model preservation around this endpoint.

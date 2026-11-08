@@ -52,6 +52,11 @@ from api.config import (
     invalidate_models_cache,
     reload_config,
 )
+from api.config import (
+    _provider_models_are_discovered_catalog,
+    _published_provider_model_ids,
+    warm_models_catalog_provenance_if_cold,
+)
 from api.plugin_providers import (
     effective_provider_display_name,
     effective_provider_env_var,
@@ -3188,6 +3193,8 @@ def get_providers() -> dict[str, Any]:
             # the ``models`` catalog are appended via _configured_model_ids
             # (which strips whitespace, drops empty IDs, and de-duplicates).
             # This keeps the Providers card consistent with the picker.
+            from api.routes import _custom_provider_allowlist_ids
+
             cp_model_ids: list[str] = []
             _singular_model = str(cp.get("model") or "").strip()
             if _singular_model:
@@ -3196,6 +3203,13 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
+            # Discovered catalog = snapshot: show the live catalog the picker
+            # published (disk-only warm, no probe) so Refresh models updates it.
+            if _provider_models_are_discovered_catalog(cp):
+                warm_models_catalog_provenance_if_cold()
+                _live_ids = _published_provider_model_ids(cp_id)
+                if _live_ids:
+                    cp_models = [{"id": mid, "label": mid} for mid in _live_ids]
             # Check for env var reference (${VAR_NAME} pattern)
             cp_api_key = str(cp.get("api_key") or "")
             cp_has_key = bool(cp_api_key.strip())
@@ -3219,7 +3233,13 @@ def get_providers() -> dict[str, Any]:
                 "is_custom": True,
                 "key_source": "config_yaml" if cp_has_key else "none",
                 "models": cp_models,
+                "saved_model_ids": _custom_provider_allowlist_ids(cp),
                 "models_total": len(cp_models),
+                # "all" when the endpoint's live catalog is authoritative,
+                # "list" when the entry is pinned to an explicit whitelist.
+                "models_mode": (
+                    "all" if _provider_models_are_discovered_catalog(cp) else "list"
+                ),
             })
 
     # Determine active provider
@@ -3245,6 +3265,76 @@ def get_providers() -> dict[str, Any]:
         "active_provider": active_provider,
     }
     return _store_cached_providers(cache_key, result)
+
+
+def set_custom_provider_models(
+    provider_id: str, models: list[str], discover: bool
+) -> dict[str, Any]:
+    """Pin or unpin the model whitelist of a ``custom_providers`` entry.
+
+    ``discover=True`` clears the ``discover_models: false`` opt-out, so the
+    endpoint's live ``/v1/models`` catalog is authoritative again.
+    ``discover=False`` writes exactly ``models`` as the allowlist and sets
+    ``discover_models: false`` — the pin ``_provider_models_are_discovered_catalog``
+    honours, so the picker offers only the picked ids.
+    """
+    pid = str(provider_id or "").strip().lower()
+    if not pid:
+        return {"ok": False, "error": "Provider ID is required."}
+    picked: list[str] = []
+    for raw in models or []:
+        mid = str(raw or "").strip()
+        if not mid or "\n" in mid or "\r" in mid:
+            continue
+        if mid not in picked:
+            picked.append(mid)
+    if len(picked) > 500:
+        return {"ok": False, "error": "Too many models selected (max 500)."}
+    if not discover and not picked:
+        return {"ok": False, "error": "Pick at least one model, or allow all models."}
+
+    from api.config import _cfg_lock
+
+    # Resolve through api.config at call time: tests and profile flows
+    # monkeypatch the path resolver after this module was imported.
+    import api.config as _config
+
+    config_path = _config._get_config_path()
+    if not config_path.exists():
+        return {"ok": False, "error": "No config.yaml found for this profile."}
+    try:
+        from api import yaml_compat as _yaml
+
+        with _cfg_lock:
+            cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if not isinstance(cfg, dict):
+                return {"ok": False, "error": "config.yaml is not a mapping."}
+            entry = None
+            entries = cfg.get("custom_providers")
+            if isinstance(entries, list):
+                for cp in entries:
+                    if isinstance(cp, dict) and _custom_provider_name_matches(pid, cp.get("name")):
+                        entry = cp
+                        break
+            if entry is None:
+                return {
+                    "ok": False,
+                    "error": "'" + pid + "' is not a custom provider in config.yaml.",
+                }
+            if discover:
+                entry.pop("discover_models", None)
+                entry["models_discovered"] = True
+            else:
+                entry["models"] = list(picked)
+                entry["discover_models"] = False
+            _save_yaml_config_file(config_path, cfg)
+    except Exception as exc:
+        logger.exception("Failed to save custom provider models for %s", pid)
+        return {"ok": False, "error": "Failed to save models: " + str(exc)}
+
+    invalidate_models_cache()
+    invalidate_providers_cache()
+    return {"ok": True, "provider": pid, "models": picked, "discover": bool(discover)}
 
 
 def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:

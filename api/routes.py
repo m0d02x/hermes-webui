@@ -2487,7 +2487,7 @@ _OPENAI_COMPAT_ENDPOINTS = {
 # specific model filtering happens downstream in hermes_cli.
 #
 _LIVE_MODELS_CACHE_TTL = 60.0
-_LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_LIVE_MODELS_CACHE: dict[tuple[str, str, bool], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
 
 
@@ -2504,11 +2504,11 @@ def _active_profile_for_live_models_cache() -> str:
         return "default"
 
 
-def _live_models_cache_key(provider: str) -> tuple[str, str]:
-    return (_active_profile_for_live_models_cache(), provider)
+def _live_models_cache_key(provider: str, full_catalog: bool = False) -> tuple[str, str, bool]:
+    return (_active_profile_for_live_models_cache(), provider, full_catalog)
 
 
-def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
+def _get_cached_live_models(key: tuple[str, str, bool]) -> dict | None:
     now = time.monotonic()
     with _LIVE_MODELS_CACHE_LOCK:
         cached = _LIVE_MODELS_CACHE.get(key)
@@ -2521,7 +2521,7 @@ def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
         return copy.deepcopy(payload)
 
 
-def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
+def _set_cached_live_models(key: tuple[str, str, bool], payload: dict) -> None:
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
 
@@ -18878,6 +18878,22 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
 
+    if parsed.path == "/api/providers/custom-models":
+        from api.providers import set_custom_provider_models
+        provider_id = (body.get("provider") or "").strip().lower()
+        if not provider_id:
+            return bad(handler, "provider is required")
+        raw_models = body.get("models")
+        result = set_custom_provider_models(
+            provider_id,
+            raw_models if isinstance(raw_models, list) else [],
+            bool(body.get("discover")),
+        )
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        _clear_live_models_cache()
+        return j(handler, result)
+
     if parsed.path == "/api/providers/delete":
         provider_id = (body.get("provider") or "").strip().lower()
         if not provider_id:
@@ -18899,7 +18915,10 @@ def handle_post(handler, parsed) -> bool:
         if not provider_id:
             return bad(handler, "provider is required")
         from api.config import invalidate_provider_models_cache
+        from api.providers import invalidate_providers_cache
         invalidate_provider_models_cache(provider_id)
+        invalidate_providers_cache()
+        _clear_live_models_cache()
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
@@ -25946,6 +25965,7 @@ def _handle_live_models(handler, parsed):
 
     Query params:
         provider  (optional) — provider ID; defaults to active profile provider
+        all=1     (optional) — return the full live catalog for a custom provider
     """
     qs = parse_qs(parsed.query)
     provider = (qs.get("provider", [""])[0] or "").lower().strip()
@@ -25966,13 +25986,17 @@ def _handle_live_models(handler, parsed):
         from api.config import _resolve_provider_alias
         provider = _resolve_provider_alias(provider)
 
-        cache_key = _live_models_cache_key(provider)
+        full_catalog = qs.get("all", [""])[0] == "1" and (
+            provider == "custom" or provider.startswith("custom:")
+        )
+        cache_key = _live_models_cache_key(provider, full_catalog)
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
             return j(handler, cached)
 
         def _finish(payload: dict):
-            _set_cached_live_models(cache_key, payload)
+            if not full_catalog or (payload.get("models") and not payload.get("error")):
+                _set_cached_live_models(cache_key, payload)
             return j(handler, payload)
 
         # Delegate to the agent's live-fetch + fallback resolver.
@@ -25992,30 +26016,43 @@ def _handle_live_models(handler, parsed):
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
 
+        def _custom_provider_entries_for_request():
+            if not (provider == "custom" or provider.startswith("custom:")):
+                return []
+            try:
+                from api.config import _custom_provider_slug_from_name
+                _cp_entries = cfg.get("custom_providers", [])
+                if not isinstance(_cp_entries, list):
+                    return []
+                _matches = []
+                for _cp in _cp_entries:
+                    if not isinstance(_cp, dict):
+                        continue
+                    _slug = _custom_provider_slug_from_name(_cp.get("name", ""))
+                    if provider.startswith("custom:"):
+                        if _slug == provider:
+                            _matches.append(_cp)
+                    elif provider == "custom" and not _slug:
+                        _matches.append(_cp)
+                return _matches
+            except Exception:
+                return []
+
+        if ids and not full_catalog and (provider == "custom" or provider.startswith("custom:")):
+            # The agent answers custom:* from the configured relay, i.e. every
+            # model the router serves. A pinned whitelist still applies to it.
+            _agent_allow = []
+            for _cp in _custom_provider_entries_for_request():
+                _agent_allow.extend(_custom_provider_allowlist_ids(_cp))
+            if _agent_allow:
+                _agent_allow_set = set(_agent_allow)
+                ids = [m for m in ids if m in _agent_allow_set]
+                for _aid in _agent_allow:
+                    if _aid not in ids:
+                        ids.append(_aid)
+
         if not ids:
             custom_provider_entry = None
-
-            def _custom_provider_entries_for_request():
-                if not (provider == "custom" or provider.startswith("custom:")):
-                    return []
-                try:
-                    from api.config import _custom_provider_slug_from_name
-                    _cp_entries = cfg.get("custom_providers", [])
-                    if not isinstance(_cp_entries, list):
-                        return []
-                    _matches = []
-                    for _cp in _cp_entries:
-                        if not isinstance(_cp, dict):
-                            continue
-                        _slug = _custom_provider_slug_from_name(_cp.get("name", ""))
-                        if provider.startswith("custom:"):
-                            if _slug == provider:
-                                _matches.append(_cp)
-                        elif provider == "custom" and not _slug:
-                            _matches.append(_cp)
-                    return _matches
-                except Exception:
-                    return []
 
             def _custom_provider_model_ids(_cp):
                 _ids = []
@@ -26059,6 +26096,7 @@ def _handle_live_models(handler, parsed):
             # prevent the live fetch below from running (#3718).
             _config_ids = []
             _allowlist_ids = []
+            _probe_succeeded = False
             if provider == "custom" or provider.startswith("custom:"):
                 for _cp in _custom_provider_entries_for_request():
                     if custom_provider_entry is None:
@@ -26075,16 +26113,18 @@ def _handle_live_models(handler, parsed):
                 if custom_provider_entry:
                     _base_url = custom_provider_entry.get("base_url")
                     _api_key = _custom_provider_api_key(custom_provider_entry)
-                else:
+                elif not full_catalog or provider == "custom":
                     _model_cfg = cfg.get("model", {})
                     _base_url = _model_cfg.get("base_url")
                     _api_key = _model_cfg.get("api_key")
                 # Fallback: try credential pool for base_url + api_key
+                _has_pool_credentials = False
                 if (not _base_url or not _api_key) and provider.startswith("custom:"):
                     try:
                         from api.config import _has_explicit_pool_credentials
 
-                        if _has_explicit_pool_credentials(provider):
+                        _has_pool_credentials = _has_explicit_pool_credentials(provider)
+                        if _has_pool_credentials:
                             from agent.credential_pool import load_pool as _lpool
                             _resolved = _resolve_provider_alias(provider)
                             _lm_pool = _lpool(_resolved)
@@ -26097,7 +26137,18 @@ def _handle_live_models(handler, parsed):
                                         _base_url = str(getattr(_lm_entry, "base_url", "") or "").strip()
                     except ImportError:
                         pass
-                if _base_url and _api_key:
+                _api_key = str(_api_key or "").strip()
+                _keyless_local = False
+                if full_catalog and custom_provider_entry and _base_url and not _api_key:
+                    from api.config import _base_url_points_at_local_server, _custom_record_declares_credential
+                    _parsed_base = urlsplit(str(_base_url))
+                    _keyless_local = (
+                        _parsed_base.scheme in ("http", "https")
+                        and _base_url_points_at_local_server(_base_url)
+                        and not _has_pool_credentials
+                        and not _custom_record_declares_credential(custom_provider_entry, _base_url, None)
+                    )
+                if _base_url and (_api_key or _keyless_local):
                     try:
                         import urllib.request
                         import json
@@ -26111,10 +26162,8 @@ def _handle_live_models(handler, parsed):
                         else:
                             _models_url = f"{_ep}/v1/models"
                         
-                        _req = urllib.request.Request(
-                            _models_url,
-                            headers={"Authorization": f"Bearer {_api_key}"},
-                        )
+                        _headers = {"Authorization": f"Bearer {_api_key}"} if _api_key else {}
+                        _req = urllib.request.Request(_models_url, headers=_headers)
                         
                         with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
                             _body = json.loads(_resp.read())
@@ -26126,6 +26175,9 @@ def _handle_live_models(handler, parsed):
                                 ids = [m.get("id", "") for m in _data if m.get("id")]
                         elif isinstance(_body, list):
                             ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
+                        else:
+                            raise ValueError("invalid custom provider catalog")
+                        _probe_succeeded = True
 
                         if ids:
                             logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
@@ -26160,14 +26212,19 @@ def _handle_live_models(handler, parsed):
                 # deny-all use case exists: a provider the user wants hidden is
                 # removed from ``custom_providers`` outright.
                 if ids:
-                    if _allowlist_ids:
+                    if _allowlist_ids and not full_catalog:
                         _allowlist_set = set(_allowlist_ids)
                         ids = [m for m in ids if m in _allowlist_set] or []
                         for _aid in _allowlist_ids:
                             if _aid not in ids:
                                 ids.append(_aid)
-                else:
+                elif not full_catalog:
                     ids = list(_allowlist_ids or _config_ids)
+                elif not _probe_succeeded:
+                    return _finish({"provider": provider, "models": [], "count": 0,
+                                    "error": "catalog_unavailable"})
+                else:
+                    return _finish({"provider": provider, "models": [], "count": 0})
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider
@@ -26233,7 +26290,9 @@ def _handle_live_models(handler, parsed):
                 ids = _featured
             except Exception:
                 logger.debug("Failed to apply Nous featured-set cap for /api/models/live")
-        else:
+        elif not (provider == "custom" or provider.startswith("custom:")):
+            # Custom routers are user-owned catalogs: /api/models never caps
+            # them, so this enrichment path must not either.
             from api.config import _MODEL_PICKER_OVERFLOW_THRESHOLD, _MODEL_PICKER_VISIBLE_TARGET
             if len(ids) > _MODEL_PICKER_OVERFLOW_THRESHOLD:
                 ids = ids[:_MODEL_PICKER_VISIBLE_TARGET]
@@ -26251,6 +26310,10 @@ def _handle_live_models(handler, parsed):
             """Best-effort human label from a model ID string."""
             if provider in ("ollama", "ollama-cloud"):
                 return _fmt_ollama(mid)
+            # Custom endpoints: /api/models and the Providers card label a
+            # model by its endpoint id, so enrichment rows must match them.
+            if provider == "custom" or provider.startswith("custom:"):
+                return mid
             # Preserve slashes for router IDs like "anthropic/claude-sonnet-4.6"
             display = mid.split("/")[-1] if "/" in mid else mid
             parts = display.split("-")

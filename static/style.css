@@ -6009,6 +6009,11 @@ main.main > #mainPlugin{display:none;}
 .provider-card-model-tags{
   display:flex;flex-wrap:wrap;gap:4px;
 }
+.provider-card-model-tags-editable{
+  max-height:240px;
+  overflow-y:auto;
+  align-content:flex-start;
+}
 .provider-card-model-tag{
   display:inline-block;
   padding:2px 8px;
@@ -6029,6 +6034,33 @@ main.main > #mainPlugin{display:none;}
   border-style:dashed;
   user-select:none;
   cursor:help;
+}
+/* Editable whitelist pills (custom_providers): click to include/exclude.
+   `is-on` mirrors the model being offered in the picker. */
+.provider-card-model-tag-toggle{
+  cursor:pointer;
+  font-family:var(--font-mono);
+  user-select:none;
+  max-width:100%;overflow-wrap:anywhere;
+}
+.provider-card-model-tag-toggle:hover{border-color:var(--accent);color:var(--fg);}
+.provider-card-model-tag-toggle.is-on{
+  color:var(--fg);
+  border-color:var(--accent);
+  background:var(--surface);
+  box-shadow:inset 0 0 0 1px var(--accent);
+}
+.provider-card-model-mode{
+  display:flex;gap:6px;flex-wrap:wrap;
+}
+@media (pointer:coarse){
+  .provider-card-model-input{font-size:16px;}
+  .provider-card-model-tag-toggle{min-height:44px;}
+}
+.provider-card-model-mode-btn.is-active{
+  color:var(--fg);
+  border-color:var(--accent);
+  box-shadow:inset 0 0 0 1px var(--accent);
 }
 
 /* ── Session pin indicator (inline, only when pinned) ── */
