@@ -65,13 +65,13 @@ def completion_delivery_id(evt: Any) -> str:
 _WAKEUP_COMPLETION_RE = re.compile(
     r"\A\[IMPORTANT: Background process (?P<sid>[^\n]*?) completed "
     r"\(exit_code=(?P<exit_code>[^)\n]*)\)\.\n"
-    r"Command: (?P<cmd>[^\n]*)\n"
+    r"Command: (?P<cmd>[\s\S]*?)\n"
     r"Output:\n"
 )
 _WAKEUP_WATCH_MATCH_RE = re.compile(
     r"\A\[IMPORTANT: Background process (?P<sid>[^\n]*?) matched watch pattern "
     r"\"(?P<pattern>.*)\"\.\n"
-    r"Command: (?P<cmd>[^\n]*)\n"
+    r"Command: (?P<cmd>[\s\S]*?)\n"
     r"Matched output:\n"
 )
 
@@ -85,8 +85,8 @@ def wakeup_display_meta(text: Any) -> dict | None:
     section stays in the message body (the UI extracts it there), so the
     metadata never duplicates multi-KB process output in the store.
 
-    Header fields are anchored to the pinned single-line grammar (``sid``,
-    ``exit_code``, ``command``, ``pattern`` never contain newlines). The
+    ``sid``, ``exit_code`` and ``pattern`` are single-line; ``command`` may span
+    lines (a shell script), so it is matched lazily up to ``\nOutput:\n``. The
     optional watch suppression note is deliberately NOT parsed out: it lives in
     the free-form output tail, where process output can contain the exact same
     "(N earlier matches were suppressed…)" text, so inferring it from the body

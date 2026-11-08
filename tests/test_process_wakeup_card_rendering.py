@@ -82,6 +82,7 @@ const signalInfo = _processWakeupInfo({}, signalBody);
 const watchInfo = _processWakeupInfo({}, watchBody);
 const htmlInfo = _processWakeupInfo({}, htmlBody);
 const wsInfo = _processWakeupInfo({}, wsBody);
+const mlInfo = _processWakeupInfo({}, '[IMPORTANT: Background process p completed (exit_code=0).\nCommand: for i in 1; do x; done\nsleep 15\nOutput:\ndone]');
 const supLikeInfo = _processWakeupInfo({}, supLikeBody);
 const metaOnlyInfo = _processWakeupInfo(
   {_wakeup_meta: {type: 'completion', task_id: 'srv_1', command: 'cargo test', exit_code: 1}},
@@ -100,6 +101,7 @@ process.stdout.write(JSON.stringify({
   unparseableIsNull: _processWakeupInfo({}, 'plain text') === null,
   emptyIsNull: _processWakeupInfo({content: ''}, '') === null,
   wsInfoOutput: wsInfo.output,
+  mlInfo,
   supLikeInfo,
   okCard: _processWakeupCardHtml(okInfo, okBody, extras),
   failCard: _processWakeupCardHtml(failInfo, failBody, extras),
@@ -153,6 +155,8 @@ def test_output_whitespace_is_preserved_byte_for_byte():
     # trimmed away in the rendered <pre>.
     result = _run_driver()
     assert result["wsInfoOutput"] == "    indented line\n\n"
+    assert result["mlInfo"]["command"] == "for i in 1; do x; done\nsleep 15"
+    assert result["mlInfo"]["output"] == "done"
     ws_card = result["wsCard"]
     assert "<pre class=\"process-wakeup-text\">    indented line\n\n</pre>" in ws_card
 

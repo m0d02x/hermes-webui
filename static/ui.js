@@ -21758,14 +21758,15 @@ function _clampVirtualizedBlankViewportToRenderedEdge(ownership){
 // null and keep the raw-notice fallback.
 function _parseProcessWakeupBody(text){
   const s=String(text||'');
-  // Header groups are single-line by grammar; the output group captures the
+  // Header groups are single-line by grammar except `command` (multi-line shell
+  // scripts; lazy match up to the Output marker); the output group captures the
   // rest verbatim (leading indentation / trailing blank lines preserved). The
   // watch suppression note is intentionally NOT split out of the output — real
   // process output can contain the identical text, so stripping it would drop
   // legitimate content (#6350 review finding 2). It rides along in `output`.
-  let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand: ([^\n]*)\nOutput:\n([\s\S]*)\]$/);
+  let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand: ([\s\S]*?)\nOutput:\n([\s\S]*)\]$/);
   if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
-  m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
+  m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([\s\S]*?)\nMatched output:\n([\s\S]*)\]$/);
   if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
   return null;
 }

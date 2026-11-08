@@ -118,6 +118,19 @@ def test_watch_match_pattern_with_quotes_round_trips():
     assert "suppressed" not in meta
 
 
+def test_multiline_command_round_trips():
+    cmd = "for i in 1 2; do echo $i; done\nsleep 1"
+    meta = wakeup_display_meta(
+        "[IMPORTANT: Background process p completed (exit_code=0).\n"
+        f"Command: {cmd}\nOutput:\nok]")
+    assert meta["command"] == cmd
+    assert meta["exit_code"] == 0
+    watch = wakeup_display_meta(
+        "[IMPORTANT: Background process w matched watch pattern \"E\".\n"
+        f"Command: {cmd}\nMatched output:\nE]")
+    assert watch["command"] == cmd
+
+
 def test_free_text_and_unknown_bodies_return_none():
     assert wakeup_display_meta("[IMPORTANT: watcher disabled after errors]") is None
     assert wakeup_display_meta("hello") is None
